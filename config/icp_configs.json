@@ -1,0 +1,246 @@
+{
+  "tutrain": {
+    "segment_name": "TUTRAIN",
+    "value_prop_one_liner": "White-label live remote tutoring infrastructure for EdTech platforms",
+    "what_we_offer": "Expert live remote tutors delivered as a service — branded as the customer's product, scalable on-demand, no in-house hiring or management required",
+    "target_industries": {
+      "naics_codes": ["611710", "611699", "611420", "611691"],
+      "linkedin_categories": [
+        "E-Learning Providers",
+        "Education Administration Programs",
+        "Higher Education",
+        "Primary and Secondary Education"
+      ],
+      "industry_keywords": [
+        "edtech",
+        "K-12",
+        "test prep",
+        "tutoring",
+        "online learning",
+        "language learning"
+      ]
+    },
+    "target_company_profile": {
+      "size_ranges": ["1-10", "11-50", "51-200"],
+      "revenue_ranges": ["0-500K", "500K-1M", "1M-5M", "5M-10M"],
+      "funding_stages": ["Pre-Seed", "Seed", "Series A"],
+      "funding_recency_days": 240,
+      "geographies": {"countries": ["US"], "regions": []},
+      "founded_after_year": 2020
+    },
+    "target_titles": [
+      "Founder",
+      "Co-Founder",
+      "CEO",
+      "CTO",
+      "Head of Product",
+      "VP of Product",
+      "Chief Product Officer",
+      "Head of Curriculum",
+      "Chief Academic Officer",
+      "VP of Education",
+      "Head of Content",
+      "Head of Operations"
+    ],
+    "target_departments": ["c-suite", "product", "education"],
+    "target_levels": ["founder", "c-suite", "vice president", "director", "head"],
+    "positive_signals": [
+      "Currently hiring tutors or instructors",
+      "Recent product launch or platform pivot",
+      "Mentions human support gaps or scalability challenges",
+      "Raises funding in last 8 months",
+      "Posts about engagement or learning outcome metrics"
+    ],
+    "negative_signals": [
+      "Brick-and-mortar tutoring center",
+      "Already operates their own tutor network at scale",
+      "Pure B2C parent-facing brand with no platform",
+      "Enterprise corporate L&D only",
+      "Series B or later (likely has in-house team)",
+      "More than 500 employees"
+    ],
+    "scoring_weights": {
+      "funding_recency": 40,
+      "segment_fit": 30,
+      "buying_signal": 20,
+      "reachability": 10
+    },
+    "scoring_thresholds": {
+      "auto_drop_below": 70,
+      "tier_1_above": 85,
+      "tier_2_above": 70
+    },
+    "outreach_angle": {
+      "pain_hypothesis": "Early-stage EdTech founders often promise live human support but can't economically staff or scale it — engineering team is small, tutoring is operational debt",
+      "value_framing": "Plug-and-play white-label tutoring tier. You keep the brand, the data, and the margin. We deliver vetted tutors on-demand.",
+      "primary_cta": "15-min walkthrough of how we white-label for similar-stage platforms",
+      "fallback_cta": "Free 5-tutor pilot for 2 weeks, no commitment"
+    }
+  },
+  "eqourse_content": {
+    "segment_name": "eQOURSE Content",
+    "value_prop_one_liner": "Custom US-standards-mapped digital curriculum, test-prep question banks, and structured learning content for EdTech platforms",
+    "what_we_offer": "Pre-built and custom US-standards-mapped curriculum, test-prep question banks, and structured learning content — delivered as a service so platforms ship content with their product instead of building it in-house",
+    "target_industries": {
+      "naics_codes": ["611710", "611699", "511130"],
+      "linkedin_categories": [
+        "E-Learning Providers",
+        "Education Administration Programs",
+        "Higher Education",
+        "Primary and Secondary Education"
+      ],
+      "industry_keywords": [
+        "edtech",
+        "K-12",
+        "test prep",
+        "tutoring",
+        "online learning",
+        "language learning"
+      ]
+    },
+    "target_company_profile": {
+      "size_ranges": ["1-10", "11-50", "51-200"],
+      "revenue_ranges": ["0-500K", "500K-1M", "1M-5M", "5M-10M"],
+      "funding_stages": ["Pre-Seed", "Seed", "Series A"],
+      "funding_recency_days": 240,
+      "geographies": {"countries": ["US"], "regions": []},
+      "founded_after_year": 2020
+    },
+    "target_titles": [
+      "Founder",
+      "Co-Founder",
+      "CEO",
+      "CTO",
+      "Head of Product",
+      "VP of Product",
+      "Chief Product Officer",
+      "Head of Curriculum",
+      "Chief Academic Officer",
+      "VP of Education",
+      "Head of Operations",
+      "Head of Content",
+      "Head of Curriculum Development",
+      "Director of Content",
+      "Head of Learning Design"
+    ],
+    "target_departments": ["c-suite", "product", "education"],
+    "target_levels": ["founder", "c-suite", "vice president", "director", "head"],
+    "positive_signals": [
+      "Currently hiring tutors or instructors",
+      "Recent product launch or platform pivot",
+      "Mentions human support gaps or scalability challenges",
+      "Raises funding in last 8 months",
+      "Posts about engagement or learning outcome metrics",
+      "Building K-12 or test-prep platform",
+      "Hiring content writers or curriculum designers",
+      "Mentions content gap or roadmap delay",
+      "Has product but limited content library"
+    ],
+    "negative_signals": [
+      "Brick-and-mortar tutoring center",
+      "Already operates their own tutor network at scale",
+      "Pure B2C parent-facing brand with no platform",
+      "Enterprise corporate L&D only",
+      "Series B or later (likely has in-house team)",
+      "More than 500 employees",
+      "Already has 1000+ curriculum items live",
+      "Curriculum publisher (competitor)"
+    ],
+    "scoring_weights": {
+      "funding_recency": 40,
+      "segment_fit": 30,
+      "buying_signal": 20,
+      "reachability": 10
+    },
+    "scoring_thresholds": {
+      "auto_drop_below": 70,
+      "tier_1_above": 85,
+      "tier_2_above": 70
+    },
+    "outreach_angle": {
+      "pain_hypothesis": "Seed-stage EdTech with engineering team but no curriculum staff. Building content in-house takes 6-12 months and pulls focus from product.",
+      "value_framing": "Pre-built or custom-built US-standards curriculum, test banks, and learning data. Ship content with your platform, not after.",
+      "primary_cta": "15-min look at a sample of curriculum we've built for similar platforms",
+      "fallback_cta": "Free 50-question pilot bank in your subject area"
+    }
+  },
+  "eqourse_ai_data": {
+    "segment_name": "eQOURSE AI Data Service",
+    "value_prop_one_liner": "High-quality data annotation, RLHF feedback collection, and model evaluation services for AI/ML companies, delivered by expert human annotators",
+    "what_we_offer": "Domain-expert annotators for LLM RLHF, evaluation datasets, voice/speech labeling, computer vision tagging, and custom red-teaming. Education-domain experts in-house.",
+    "target_industries": {
+      "naics_codes": ["541512", "541511", "541715"],
+      "linkedin_categories": [
+        "Software Development",
+        "IT Services and IT Consulting",
+        "Research Services",
+        "Artificial Intelligence (AI)"
+      ],
+      "industry_keywords": [
+        "AI",
+        "ML",
+        "LLM",
+        "machine learning",
+        "voice AI",
+        "computer vision",
+        "NLP",
+        "RLHF",
+        "foundation model",
+        "AI agent"
+      ]
+    },
+    "target_company_profile": {
+      "size_ranges": ["11-50", "51-200", "201-500"],
+      "revenue_ranges": ["0-500K", "500K-1M", "1M-5M", "5M-10M"],
+      "funding_stages": ["Seed", "Series A", "Series B"],
+      "funding_recency_days": 240,
+      "geographies": {"countries": ["US"], "regions": []},
+      "founded_after_year": 2020
+    },
+    "target_titles": [
+      "Founder",
+      "Co-Founder",
+      "CTO",
+      "Chief AI Officer",
+      "VP of Engineering",
+      "Head of ML",
+      "ML Lead",
+      "Head of Data",
+      "Head of Research",
+      "Head of AI",
+      "Director of AI"
+    ],
+    "target_departments": ["c-suite", "engineering", "r&d", "data"],
+    "target_levels": ["founder", "c-suite", "vice president", "director", "head"],
+    "positive_signals": [
+      "Hiring ML engineers or annotators",
+      "Recent foundation model release",
+      "Series A/B in last 8 months",
+      "Open job posts mention data quality, evaluation, or annotation",
+      "Building LLM, voice AI, or computer vision product"
+    ],
+    "negative_signals": [
+      "Pure infrastructure (databases, hosting)",
+      "Hardware-only AI chip companies",
+      "Established AI giants (>1000 employees)",
+      "AI consultancies with no product"
+    ],
+    "scoring_weights": {
+      "funding_recency": 40,
+      "segment_fit": 30,
+      "buying_signal": 20,
+      "reachability": 10
+    },
+    "scoring_thresholds": {
+      "auto_drop_below": 70,
+      "tier_1_above": 85,
+      "tier_2_above": 70
+    },
+    "outreach_angle": {
+      "pain_hypothesis": "Series A AI startup just raised and is scaling model training. Their evaluation and RLHF pipelines need rapid expert labeling at quality their automated pipeline can't deliver.",
+      "value_framing": "Domain-expert annotators (education, language, STEM) at SLA quality. Faster than building in-house, more accurate than crowd platforms.",
+      "primary_cta": "15-min review of our annotation quality and turnaround vs your current approach",
+      "fallback_cta": "Free 500-row pilot annotation in your most painful labeling category"
+    }
+  }
+}

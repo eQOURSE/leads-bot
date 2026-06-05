@@ -1,0 +1,115 @@
+name: Daily Lead Generation Pipeline
+
+on:
+  schedule:
+    - cron: '0 1 * * *'  # 01:00 UTC = 06:30 IST
+  workflow_dispatch:       # manual trigger via GitHub Actions UI / dashboard
+    inputs:
+      segment:
+        description: 'Segment (all, tutrain, eqourse_content, eqourse_ai_data)'
+        required: false
+        default: 'all'
+      target:
+        description: 'Target leads per segment'
+        required: false
+        default: '30'
+
+jobs:
+  run-pipeline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Cache pip packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m venv .venv
+          source .venv/bin/activate
+          pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install langgraph-checkpoint-sqlite
+
+      - name: Write .env from secrets
+        run: |
+          cat > .env << 'ENVEOF'
+          GCP_PROJECT_ID=${{ secrets.GCP_PROJECT_ID }}
+          GCP_REGION=us-central1
+          GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
+          VIBE_PROSPECTING_API_KEY=${{ secrets.VIBE_PROSPECTING_API_KEY }}
+          HUNTER_API_KEY=${{ secrets.HUNTER_API_KEY }}
+          SCRAPEGRAPH_API_KEY=${{ secrets.SCRAPEGRAPH_API_KEY }}
+          APIFY_TOKEN_1=${{ secrets.APIFY_TOKEN_1 }}
+          APIFY_TOKEN_2=${{ secrets.APIFY_TOKEN_2 }}
+          APIFY_TOKEN_3=${{ secrets.APIFY_TOKEN_3 }}
+          APIFY_TOKEN_4=${{ secrets.APIFY_TOKEN_4 }}
+          SERPAPI_KEY=${{ secrets.SERPAPI_KEY }}
+          NEWSDATA_API_KEY=${{ secrets.NEWSDATA_API_KEY }}
+          COMPANIES_API_TOKEN=${{ secrets.COMPANIES_API_TOKEN }}
+          ABSTRACT_EMAIL_API_KEY=${{ secrets.ABSTRACT_EMAIL_API_KEY }}
+          TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID=${{ secrets.TELEGRAM_CHAT_ID }}
+          SHEET_ID=${{ secrets.SHEET_ID }}
+          SQLITE_PATH=./data/leads.db
+          LOG_LEVEL=INFO
+          ENVEOF
+
+      - name: Write GCP service account JSON
+        run: |
+          mkdir -p secrets
+          echo '${{ secrets.GCP_SERVICE_ACCOUNT_JSON }}' > secrets/gcp-service-account.json
+
+      - name: Initialise database
+        run: |
+          source .venv/bin/activate
+          python scripts/init_db.py
+
+      - name: Run migration (Phase 8)
+        run: |
+          source .venv/bin/activate
+          python scripts/migrate_phase8.py
+        continue-on-error: true
+
+      - name: Run pipeline
+        env:
+          INPUT_SEGMENT: ${{ github.event.inputs.segment || 'all' }}
+          INPUT_TARGET: ${{ github.event.inputs.target || '30' }}
+        run: |
+          source .venv/bin/activate
+          if [ "$INPUT_SEGMENT" = "all" ]; then
+            python scripts/run_pipeline.py --all-segments --target "$INPUT_TARGET"
+          else
+            python scripts/run_pipeline.py --segment "$INPUT_SEGMENT" --target "$INPUT_TARGET"
+          fi
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-logs-${{ github.run_id }}
+          path: logs/
+          retention-days: 7
+
+      - name: Upload database snapshot
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pipeline-db-${{ github.run_id }}
+          path: |
+            data/leads.db
+            data/checkpoints.db
+          retention-days: 3

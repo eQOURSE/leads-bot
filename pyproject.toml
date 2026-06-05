@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lead-gen-system"
+version = "0.1.0"
+description = "Multi-agent lead generation system"
+requires-python = ">=3.11"
+readme = "README.md"
+
+[tool.setuptools]
+packages = ["agents", "orchestrator", "sources", "sinks", "config"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v"
