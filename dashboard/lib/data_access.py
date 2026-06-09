@@ -1,17 +1,25 @@
 """Phase 10 — Data access layer for the Streamlit dashboard.
 
-SQLite is the primary read source (fast, local). Google Sheets is the sync
-layer for human edits (status flips, replies) so they survive a fresh
-``init_db``. Writes go to BOTH SQLite and Sheets, then the cache is cleared.
+ARCHITECTURE NOTE
+-----------------
+The dashboard and the pipeline cron run on DIFFERENT machines (Streamlit Cloud
+vs GitHub Actions). SQLite is local to each, so it cannot be the shared store.
+**Google Sheets is the single source of truth the dashboard reads from** — both
+the cron and local runs write leads + run history there.
 
-All read functions are wrapped in ``st.cache_data`` with a 5-minute TTL so
-rapid page navigation never re-hits SQLite/Sheets.
+Reads come from these tabs (created by sinks/google_sheets_sink.py):
+  - <segment>_Leads tabs + "Needs Review"  → leads
+  - "Run History"                          → runs
+  - "Manual Lookup"                        → unresolved companies
+
+All reads are cached (st.cache_data, 5-min TTL) and degrade to an empty
+DataFrame with the expected columns if Sheets is unavailable, so no page
+ever crashes on missing data.
 """
 
 from __future__ import annotations
 
 import json
-import sqlite3
 from pathlib import Path
 from typing import Optional
 
@@ -19,36 +27,120 @@ import pandas as pd
 
 try:
     import streamlit as st
-except Exception:  # pragma: no cover - streamlit always present in app context
+except Exception:  # pragma: no cover
     st = None  # type: ignore
 
-# Project root so we can resolve the SQLite path / configs regardless of CWD.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
+# Tab names (must match sinks/google_sheets_sink.py)
+_SEGMENT_TABS = {
+    "tutrain": "TUTRAIN_Leads",
+    "eqourse_content": "eQOURSE_Content_Leads",
+    "eqourse_ai_data": "eQOURSE_AI_Data_Leads",
+}
+_NEEDS_REVIEW_TAB = "Needs Review"
+_MANUAL_LOOKUP_TAB = "Manual Lookup"
+_RUN_HISTORY_TAB = "Run History"
+
+# Normalized lead columns the pages rely on.
+_LEAD_COLUMNS = [
+    "id", "created_at", "run_id", "segment", "tier", "company_name", "domain",
+    "decision_maker_name", "title", "email", "email_confidence", "email_source",
+    "phone", "linkedin_url", "funding_amount", "funding_stage", "funding_date",
+    "qualifier_score", "personalization_hook", "email_subject_a",
+    "email_subject_b", "email_body", "linkedin_dm", "reply_likelihood",
+    "quality_flags", "validation_reasons", "status", "sent", "replied",
+    "notes", "reply_received",
+]
+
+# Map Sheet lead headers → normalized column names.
+_LEAD_HEADER_MAP = {
+    "Date Added": "created_at",
+    "Run ID": "run_id",
+    "Segment": "segment",
+    "Tier": "tier",
+    "Company": "company_name",
+    "Domain": "domain",
+    "Decision Maker": "decision_maker_name",
+    "Title": "title",
+    "Email": "email",
+    "Email Confidence": "email_confidence",
+    "Email Source": "email_source",
+    "Phone": "phone",
+    "LinkedIn": "linkedin_url",
+    "Funding Amount": "funding_amount",
+    "Funding Stage": "funding_stage",
+    "Funding Date": "funding_date",
+    "Qualifier Score": "qualifier_score",
+    "Why-Now Hook": "personalization_hook",
+    "Subject A": "email_subject_a",
+    "Subject B": "email_subject_b",
+    "Email Body": "email_body",
+    "LinkedIn DM": "linkedin_dm",
+    "Reply Likelihood": "reply_likelihood",
+    "Quality Flags": "quality_flags",
+    "Validation Reasons": "validation_reasons",
+    "Status": "status",
+    "Sent?": "sent",
+    "Replied?": "replied",
+    "Notes": "notes",
+}
+
+_RUN_COLUMNS = [
+    "started_at", "completed_at", "run_id", "segment", "status",
+    "candidates_found", "qualified_count", "dms_found", "emails_found",
+    "messages_generated", "ready_to_send", "needs_review", "rejected",
+    "api_credits_used", "errors",
+]
+
+_RUN_HEADER_MAP = {
+    "Date": "started_at",
+    "Run ID": "run_id",
+    "Segment": "segment",
+    "Status": "status",
+    "Duration (s)": "duration_seconds",
+    "Candidates Hunted": "candidates_found",
+    "Qualified": "qualified_count",
+    "DMs Found": "dms_found",
+    "Emails Found": "emails_found",
+    "Messages Generated": "messages_generated",
+    "Ready to Send": "ready_to_send",
+    "Needs Review": "needs_review",
+    "Rejected": "rejected",
+    "API Credits Used": "api_credits_used",
+    "Errors": "errors",
+}
+
+
+# ---------------------------------------------------------------------------
+# Config / secrets resolution (works on Cloud and locally)
+# ---------------------------------------------------------------------------
 
 def _settings():
-    """Lazily load Settings (avoids import cost at module import time)."""
     from config.settings import get_settings
     return get_settings()
 
 
-def _sqlite_path() -> str:
-    """Resolve the SQLite path to an absolute location under the project root."""
-    raw = _settings().SQLITE_PATH
-    p = Path(raw)
-    if not p.is_absolute():
-        p = (_PROJECT_ROOT / raw).resolve()
-    return str(p)
+def _secret(key: str, default=None):
+    """Read a value from st.secrets first (Cloud), else fall back to Settings/env."""
+    if st is not None:
+        try:
+            if key in st.secrets:
+                return st.secrets[key]
+        except Exception:
+            pass
+    try:
+        return getattr(_settings(), key, default)
+    except Exception:
+        return default
 
 
-def _connect() -> sqlite3.Connection:
-    # check_same_thread=False because Streamlit may call from worker threads.
-    return sqlite3.connect(_sqlite_path(), check_same_thread=False)
+def sheet_id() -> Optional[str]:
+    return _secret("SHEET_ID")
 
 
 # ---------------------------------------------------------------------------
-# Cache decorator shim — works with or without a live Streamlit runtime
-# (so the data layer is unit-testable outside the app).
+# Cache decorator shim (works with or without a live Streamlit runtime)
 # ---------------------------------------------------------------------------
 
 def _cache_data(ttl: int = 300):
@@ -61,136 +153,214 @@ def _cache_data(ttl: int = 300):
     return _identity
 
 
-def _clear_cache() -> None:
+def clear_cache() -> None:
     if st is not None and hasattr(st, "cache_data"):
         try:
             st.cache_data.clear()
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
 
-# ---------------------------------------------------------------------------
-# Reads (SQLite)
-# ---------------------------------------------------------------------------
-
-@_cache_data(ttl=300)
-def get_leads_df(segment: Optional[str] = None, status: Optional[str] = None) -> pd.DataFrame:
-    """Read leads from SQLite with optional segment/status filters."""
-    conn = _connect()
-    try:
-        query = "SELECT * FROM leads WHERE 1=1"
-        params: list = []
-        if segment:
-            query += " AND segment = ?"
-            params.append(segment)
-        if status:
-            query += " AND status = ?"
-            params.append(status)
-        query += " ORDER BY created_at DESC"
-        return pd.read_sql_query(query, conn, params=params)
-    finally:
-        conn.close()
-
-
-@_cache_data(ttl=300)
-def get_runs_df(limit: int = 100) -> pd.DataFrame:
-    """Read run history from SQLite, most recent first."""
-    conn = _connect()
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM runs ORDER BY started_at DESC LIMIT ?",
-            conn,
-            params=[int(limit)],
-        )
-    finally:
-        conn.close()
-
-
-@_cache_data(ttl=300)
-def get_replies_df(limit: int = 500) -> pd.DataFrame:
-    """Read the replies table."""
-    conn = _connect()
-    try:
-        return pd.read_sql_query(
-            "SELECT * FROM replies ORDER BY received_at DESC LIMIT ?",
-            conn,
-            params=[int(limit)],
-        )
-    finally:
-        conn.close()
-
-
-@_cache_data(ttl=300)
-def get_api_usage_df(days: int = 7) -> pd.DataFrame:
-    """Aggregate api_usage credits per source over the last N days."""
-    conn = _connect()
-    try:
-        df = pd.read_sql_query("SELECT source, date, credits_used FROM api_usage", conn)
-    finally:
-        conn.close()
-    if df.empty:
-        return pd.DataFrame(columns=["source", "credits"])
-    df["date"] = pd.to_datetime(df["date"], errors="coerce")
-    cutoff = pd.Timestamp.now().normalize() - pd.Timedelta(days=days)
-    df = df[df["date"] >= cutoff]
-    if df.empty:
-        return pd.DataFrame(columns=["source", "credits"])
-    agg = (
-        df.groupby("source")["credits_used"]
-        .sum()
-        .reset_index()
-        .rename(columns={"credits_used": "credits"})
-        .sort_values("credits", ascending=False)
-    )
-    return agg
-
-
-def count_leads_today() -> int:
-    """Count leads created today (UTC date match on created_at)."""
-    conn = _connect()
-    try:
-        cur = conn.execute(
-            "SELECT COUNT(*) FROM leads WHERE date(created_at) = date('now')"
-        )
-        return int(cur.fetchone()[0])
-    finally:
-        conn.close()
+# Backwards-compatible private alias (older code/tests referenced _clear_cache)
+_clear_cache = clear_cache
 
 
 # ---------------------------------------------------------------------------
-# Reads (Google Sheets) — Manual Lookup tab is not mirrored into SQLite
+# Google Sheets client — supports Cloud (secrets dict) and local (file)
 # ---------------------------------------------------------------------------
 
 def _gsheet_client():
     import gspread
-    creds_path = _settings().GOOGLE_SHEETS_CREDS_PATH
-    if not Path(creds_path).is_absolute():
+
+    # Cloud: service account provided as a TOML table in st.secrets.
+    if st is not None:
+        try:
+            if "gcp_service_account" in st.secrets:
+                sa = dict(st.secrets["gcp_service_account"])
+                return gspread.service_account_from_dict(sa)
+        except Exception:
+            pass
+
+    # Local: service account JSON file.
+    creds_path = _secret("GOOGLE_SHEETS_CREDS_PATH", "./secrets/gcp-service-account.json")
+    if creds_path and not Path(creds_path).is_absolute():
         creds_path = str((_PROJECT_ROOT / creds_path).resolve())
     return gspread.service_account(filename=creds_path)
 
 
-@_cache_data(ttl=300)
-def get_needs_manual_lookup_df() -> pd.DataFrame:
-    """Read the 'Manual Lookup' tab from Google Sheets. Empty DF on any failure."""
+def _open_spreadsheet():
+    sid = sheet_id()
+    if not sid:
+        raise RuntimeError("SHEET_ID is not configured (add it to Streamlit secrets).")
+    return _gsheet_client().open_by_key(sid)
+
+
+def _read_tab_records(tab_name: str) -> list[dict]:
+    """Return all records from a worksheet, or [] if missing/unavailable."""
     try:
-        client = _gsheet_client()
-        sheet = client.open_by_key(_settings().SHEET_ID).worksheet("Manual Lookup")
-        rows = sheet.get_all_records()
-        return pd.DataFrame(rows)
-    except Exception:  # noqa: BLE001 - dashboard must not crash if Sheets is down
-        return pd.DataFrame()
+        ss = _open_spreadsheet()
+        ws = ss.worksheet(tab_name)
+        return ws.get_all_records()
+    except Exception:
+        return []
 
 
 # ---------------------------------------------------------------------------
-# Funnel data for the Overview page
+# Reads — Leads
+# ---------------------------------------------------------------------------
+
+def _normalize_leads(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=_LEAD_COLUMNS)
+
+    df = pd.DataFrame(records)
+    df = df.rename(columns=_LEAD_HEADER_MAP)
+
+    # Ensure all expected columns exist.
+    for col in _LEAD_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    # Synthesize a stable id (run_id|email) for action buttons.
+    df["id"] = (
+        df["run_id"].astype(str).fillna("") + "|" +
+        df["email"].astype(str).fillna("")
+    )
+
+    # Coerce numerics.
+    for num_col in ("email_confidence", "qualifier_score", "reply_likelihood"):
+        df[num_col] = pd.to_numeric(df[num_col], errors="coerce")
+
+    # reply_received from "Replied?" == Yes
+    df["reply_received"] = df["replied"].astype(str).str.lower().isin(["yes", "true", "1"])
+
+    return df[_LEAD_COLUMNS]
+
+
+@_cache_data(ttl=300)
+def get_leads_df(segment: Optional[str] = None, status: Optional[str] = None) -> pd.DataFrame:
+    """Read all leads from the segment tabs + Needs Review, with optional filters."""
+    records: list[dict] = []
+
+    # Decide which tabs to read.
+    if segment and segment in _SEGMENT_TABS:
+        tabs = [_SEGMENT_TABS[segment], _NEEDS_REVIEW_TAB]
+    else:
+        tabs = list(_SEGMENT_TABS.values()) + [_NEEDS_REVIEW_TAB]
+
+    seen_tabs = set()
+    for tab in tabs:
+        if tab in seen_tabs:
+            continue
+        seen_tabs.add(tab)
+        records.extend(_read_tab_records(tab))
+
+    df = _normalize_leads(records)
+
+    if df.empty:
+        return df
+
+    if segment:
+        df = df[df["segment"] == segment]
+    if status:
+        df = df[df["status"] == status]
+
+    # Sort newest first.
+    if "created_at" in df.columns:
+        df = df.sort_values("created_at", ascending=False, na_position="last")
+
+    return df.reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# Reads — Runs
+# ---------------------------------------------------------------------------
+
+def _normalize_runs(records: list[dict]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=_RUN_COLUMNS)
+
+    df = pd.DataFrame(records)
+    df = df.rename(columns=_RUN_HEADER_MAP)
+
+    for col in _RUN_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    for num_col in (
+        "candidates_found", "qualified_count", "dms_found", "emails_found",
+        "messages_generated", "ready_to_send", "needs_review", "rejected",
+    ):
+        df[num_col] = pd.to_numeric(df[num_col], errors="coerce").fillna(0).astype(int)
+
+    return df
+
+
+@_cache_data(ttl=300)
+def get_runs_df(limit: int = 100) -> pd.DataFrame:
+    """Read run history from the 'Run History' tab, most recent first."""
+    records = _read_tab_records(_RUN_HISTORY_TAB)
+    df = _normalize_runs(records)
+    if df.empty:
+        return df
+    if "started_at" in df.columns:
+        df = df.sort_values("started_at", ascending=False, na_position="last")
+    return df.head(int(limit)).reset_index(drop=True)
+
+
+@_cache_data(ttl=300)
+def get_needs_manual_lookup_df() -> pd.DataFrame:
+    """Read the 'Manual Lookup' tab. Empty DF on any failure."""
+    records = _read_tab_records(_MANUAL_LOOKUP_TAB)
+    return pd.DataFrame(records) if records else pd.DataFrame()
+
+
+@_cache_data(ttl=300)
+def get_api_usage_df(days: int = 7) -> pd.DataFrame:
+    """Aggregate API credits per source from Run History 'API Credits Used' JSON."""
+    runs = get_runs_df(limit=1000)
+    if runs.empty or "api_credits_used" not in runs.columns:
+        return pd.DataFrame(columns=["source", "credits"])
+
+    totals: dict[str, int] = {}
+    for raw in runs["api_credits_used"].dropna():
+        try:
+            credits = json.loads(raw) if isinstance(raw, str) else dict(raw)
+        except Exception:
+            continue
+        for k, v in (credits or {}).items():
+            try:
+                totals[k] = totals.get(k, 0) + int(v)
+            except Exception:
+                continue
+
+    if not totals:
+        return pd.DataFrame(columns=["source", "credits"])
+
+    return (
+        pd.DataFrame([{"source": k, "credits": v} for k, v in totals.items()])
+        .sort_values("credits", ascending=False)
+        .reset_index(drop=True)
+    )
+
+
+def count_leads_today() -> int:
+    """Count leads whose created_at falls on today's date."""
+    df = get_leads_df()
+    if df.empty or "created_at" not in df.columns:
+        return 0
+    today = pd.Timestamp.now().strftime("%Y-%m-%d")
+    created = df["created_at"].astype(str)
+    return int(created.str.startswith(today).sum())
+
+
+# ---------------------------------------------------------------------------
+# Funnel
 # ---------------------------------------------------------------------------
 
 def build_funnel_data(segment: Optional[str] = None) -> dict[str, int]:
-    """Build a candidates → qualified → ready funnel from the latest run(s).
-
-    Reads from the most recent runs table rows. Returns a stage→count dict.
-    """
-    runs = get_runs_df(limit=10)
+    """Build candidates → qualified → ready funnel from the latest run(s)."""
+    runs = get_runs_df(limit=50)
     if runs.empty:
         return {"candidates": 0, "qualified": 0, "ready_to_send": 0}
 
@@ -199,106 +369,59 @@ def build_funnel_data(segment: Optional[str] = None) -> dict[str, int]:
     if runs.empty:
         return {"candidates": 0, "qualified": 0, "ready_to_send": 0}
 
-    # Use the most recent run per segment (group), summed across segments.
-    latest = runs.sort_values("started_at", ascending=False).drop_duplicates("segment")
-    candidates = int(latest["candidates_found"].fillna(0).sum())
-    qualified = int(latest["qualified_count"].fillna(0).sum())
-
-    leads = get_leads_df(segment=None if not segment or segment == "All" else segment)
-    ready = 0
-    if not leads.empty and "status" in leads.columns:
-        ready = int((leads["status"].isin(["ready_to_send", "approved", "sent"])).sum())
+    latest = runs.drop_duplicates("segment")
+    candidates = int(pd.to_numeric(latest["candidates_found"], errors="coerce").fillna(0).sum())
+    qualified = int(pd.to_numeric(latest["qualified_count"], errors="coerce").fillna(0).sum())
+    ready = int(pd.to_numeric(latest["ready_to_send"], errors="coerce").fillna(0).sum())
 
     return {"candidates": candidates, "qualified": qualified, "ready_to_send": ready}
 
 
 # ---------------------------------------------------------------------------
-# Writes — SQLite + Google Sheets, then cache invalidation
+# Writes — update the Google Sheet directly (find row by run_id + email)
 # ---------------------------------------------------------------------------
 
-def mark_lead_replied(lead_id: str, reply_text: str = "") -> None:
-    """Mark a lead as replied in SQLite + Sheets and log the reply text."""
-    import uuid
-
-    conn = _connect()
+def _find_and_update(lead_id: str, column_header: str, value: str) -> bool:
+    """Find a lead row (by 'Run ID|Email' id) across lead tabs and update one column."""
     try:
-        conn.execute(
-            "UPDATE leads SET reply_received=1, status='replied' WHERE id=?",
-            (lead_id,),
-        )
-        conn.execute(
-            "INSERT INTO replies (id, lead_id, received_at, reply_text) "
-            "VALUES (?, ?, datetime('now'), ?)",
-            (str(uuid.uuid4()), lead_id, reply_text),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    _update_sheet_cell_for_lead(lead_id, column_header="Replied?", value="Yes")
-    _clear_cache()
-
-
-def update_lead_status(lead_id: str, new_status: str) -> None:
-    """User override of validator status (approve / reject a needs_review lead)."""
-    conn = _connect()
-    try:
-        conn.execute(
-            "UPDATE leads SET status=? WHERE id=?",
-            (new_status, lead_id),
-        )
-        conn.commit()
-    finally:
-        conn.close()
-
-    _update_sheet_cell_for_lead(lead_id, column_header="Status", value=new_status)
-    _clear_cache()
-
-
-def _update_sheet_cell_for_lead(lead_id: str, column_header: str, value: str) -> bool:
-    """Best-effort: find the lead's row in its segment tab via SQLite-stored
-    sheets_row_index and update one column. Returns True on success.
-
-    Never raises — Sheets being unavailable must not break a local SQLite edit.
-    """
-    try:
-        conn = _connect()
-        try:
-            row = conn.execute(
-                "SELECT segment, sheets_row_index FROM leads WHERE id=?",
-                (lead_id,),
-            ).fetchone()
-        finally:
-            conn.close()
-        if not row:
-            return False
-        segment, sheets_row_index = row
-        if not sheets_row_index:
-            return False
-
-        tab = _segment_tab_name(segment)
-        client = _gsheet_client()
-        ss = client.open_by_key(_settings().SHEET_ID)
-        ws = ss.worksheet(tab)
-
-        # Find the column index from the header row.
-        headers = ws.row_values(1)
-        if column_header not in headers:
-            return False
-        col_idx = headers.index(column_header) + 1  # 1-based
-        ws.update_cell(int(sheets_row_index), col_idx, value)
-        return True
-    except Exception:  # noqa: BLE001
+        run_id, _, email = lead_id.partition("|")
+        ss = _open_spreadsheet()
+        for tab in list(_SEGMENT_TABS.values()) + [_NEEDS_REVIEW_TAB]:
+            try:
+                ws = ss.worksheet(tab)
+            except Exception:
+                continue
+            headers = ws.row_values(1)
+            if "Email" not in headers or column_header not in headers:
+                continue
+            records = ws.get_all_records()
+            email_col = headers.index("Email") + 1
+            runid_col = headers.index("Run ID") + 1 if "Run ID" in headers else None
+            target_col = headers.index(column_header) + 1
+            for i, rec in enumerate(records):
+                row_idx = i + 2  # +1 header, +1 1-based
+                rec_email = str(rec.get("Email", ""))
+                rec_runid = str(rec.get("Run ID", ""))
+                if rec_email == email and (not run_id or rec_runid == run_id):
+                    ws.update_cell(row_idx, target_col, value)
+                    return True
+        return False
+    except Exception:
         return False
 
 
-def _segment_tab_name(segment: str) -> str:
-    s = _settings()
-    return {
-        "tutrain": s.SHEET_TAB_TUTRAIN,
-        "eqourse_content": s.SHEET_TAB_CONTENT,
-        "eqourse_ai_data": s.SHEET_TAB_AI_DATA,
-    }.get(segment, s.SHEET_TAB_AI_DATA)
+def mark_lead_replied(lead_id: str, reply_text: str = "") -> None:
+    """Mark a lead as replied in Google Sheets."""
+    _find_and_update(lead_id, "Replied?", "Yes")
+    if reply_text:
+        _find_and_update(lead_id, "Notes", reply_text)
+    clear_cache()
+
+
+def update_lead_status(lead_id: str, new_status: str) -> None:
+    """Update a lead's status in Google Sheets (e.g. approve/reject)."""
+    _find_and_update(lead_id, "Status", new_status)
+    clear_cache()
 
 
 # ---------------------------------------------------------------------------
