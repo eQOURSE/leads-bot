@@ -48,3 +48,8 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+
+# === Temp / generated (local only, never commit) ===
+_streamlit_secrets_FILLME.toml
+_gen_streamlit_secrets.py
+_*.ps1
