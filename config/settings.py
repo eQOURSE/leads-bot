@@ -54,6 +54,12 @@ class Settings(BaseSettings):
     NEWSDATA_API_KEY: Optional[str] = None
     COMPANIES_API_TOKEN: Optional[str] = None
 
+    # === Phase 11 — Apify discovery actors (overridable) ===
+    CRUNCHBASE_APIFY_ACTOR: Optional[str] = None
+    WELLFOUND_APIFY_ACTOR: Optional[str] = None
+    ENABLE_CRUNCHBASE_DISCOVERY: bool = True
+    ENABLE_WELLFOUND_DISCOVERY: bool = True
+
     # === Parked (not wired in Phase 1) ===
     ABSTRACT_EMAIL_API_KEY: Optional[str] = None
     SMTP_HELO_DOMAIN: str = "verify.eqourse.com"

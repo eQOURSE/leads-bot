@@ -36,6 +36,10 @@ class PipelineState(TypedDict, total=False):
     nodes_completed: List[str]
     nodes_skipped: List[str]
 
+    # ---- Phase 11 measurement (transient, populated by node_hunt) ----
+    _hunter_metrics: Optional[Any]
+    _gemini_metrics: Optional[Any]
+
     # ---- Final outputs ----
     completed_at: Optional[str]           # ISO datetime string
     final_status: str                     # "success" | "partial_success" | "failed"

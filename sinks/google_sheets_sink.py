@@ -42,7 +42,7 @@ _RUN_HISTORY_HEADERS = [
     "Date", "Run ID", "Segment", "Status", "Duration (s)",
     "Candidates Hunted", "Qualified", "DMs Found", "Emails Found",
     "Messages Generated", "Ready to Send", "Needs Review",
-    "Rejected", "API Credits Used", "Errors",
+    "Rejected", "API Credits Used", "Metrics", "Errors",
 ]
 
 # Tab names that are always present
@@ -331,6 +331,7 @@ class GoogleSheetsSink:
             run_summary.get("needs_review", ""),
             run_summary.get("rejected", ""),
             json.dumps(run_summary.get("api_credits", {})),
+            json.dumps(run_summary.get("metrics", {})),
             run_summary.get("errors", ""),
         ]
         try:

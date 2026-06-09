@@ -21,6 +21,94 @@ NEWS_SOURCE_DOMAINS: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
+# Phase 11 — NAICS / ICP keyword → Crunchbase & Wellfound industry categories
+# ---------------------------------------------------------------------------
+# Crunchbase uses free-text "category groups". Wellfound uses "markets".
+# These mappings translate our ICP NAICS codes / keywords into the category
+# strings those discovery sources expect. Conservative coverage of the three
+# segments; extend as needed.
+
+NAICS_TO_CRUNCHBASE: dict[str, list[str]] = {
+    # EdTech / education
+    "611710": ["Education", "EdTech", "E-Learning"],
+    "611699": ["Education", "EdTech", "E-Learning"],
+    "611420": ["Education", "Training"],
+    "611691": ["Education", "Tutoring", "Test Prep"],
+    "511130": ["Publishing", "EdTech", "Content"],
+    # AI / data / software
+    "541512": ["Artificial Intelligence", "Machine Learning", "Software"],
+    "541511": ["Software", "Artificial Intelligence"],
+    "541715": ["Artificial Intelligence", "Machine Learning", "Research"],
+}
+
+KEYWORD_TO_CRUNCHBASE: dict[str, list[str]] = {
+    "edtech": ["Education", "EdTech", "E-Learning"],
+    "k-12": ["Education", "EdTech"],
+    "test prep": ["Education", "Test Prep", "Tutoring"],
+    "tutoring": ["Education", "Tutoring"],
+    "online learning": ["Education", "E-Learning"],
+    "language learning": ["Education", "Language Learning"],
+    "ai": ["Artificial Intelligence", "Machine Learning"],
+    "ml": ["Machine Learning", "Artificial Intelligence"],
+    "llm": ["Artificial Intelligence", "Generative AI", "Natural Language Processing"],
+    "machine learning": ["Machine Learning", "Artificial Intelligence"],
+    "voice ai": ["Artificial Intelligence", "Speech Recognition"],
+    "computer vision": ["Artificial Intelligence", "Computer Vision"],
+    "nlp": ["Natural Language Processing", "Artificial Intelligence"],
+    "rlhf": ["Artificial Intelligence", "Machine Learning"],
+    "foundation model": ["Artificial Intelligence", "Generative AI"],
+    "ai agent": ["Artificial Intelligence", "Generative AI"],
+}
+
+KEYWORD_TO_WELLFOUND_MARKET: dict[str, list[str]] = {
+    "edtech": ["Education", "EdTech"],
+    "k-12": ["Education", "K-12 Education"],
+    "test prep": ["Education", "Test Preparation"],
+    "tutoring": ["Education", "Tutoring"],
+    "online learning": ["Education", "E-Learning"],
+    "language learning": ["Language Learning"],
+    "ai": ["Artificial Intelligence"],
+    "ml": ["Machine Learning"],
+    "llm": ["Artificial Intelligence", "Generative AI"],
+    "machine learning": ["Machine Learning"],
+    "voice ai": ["Artificial Intelligence", "Voice"],
+    "computer vision": ["Computer Vision"],
+    "nlp": ["Natural Language Processing"],
+}
+
+
+def crunchbase_categories_for_icp(naics_codes, keywords) -> list[str]:
+    """Return de-duplicated Crunchbase category strings for an ICP."""
+    cats: list[str] = []
+    for code in (naics_codes or []):
+        cats.extend(NAICS_TO_CRUNCHBASE.get(str(code), []))
+    for kw in (keywords or []):
+        cats.extend(KEYWORD_TO_CRUNCHBASE.get(str(kw).lower(), []))
+    # de-dup, preserve order
+    seen: set[str] = set()
+    out: list[str] = []
+    for c in cats:
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def wellfound_markets_for_icp(keywords) -> list[str]:
+    """Return de-duplicated Wellfound market strings for an ICP."""
+    markets: list[str] = []
+    for kw in (keywords or []):
+        markets.extend(KEYWORD_TO_WELLFOUND_MARKET.get(str(kw).lower(), []))
+    seen: set[str] = set()
+    out: list[str] = []
+    for m in markets:
+        if m not in seen:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Seniority ranking for decision-maker scoring
 # ---------------------------------------------------------------------------
 

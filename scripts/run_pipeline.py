@@ -129,6 +129,51 @@ def _print_segment_summary(segment: str, state: PipelineState) -> None:
             print(f"Errors: {state.get('node_errors')}")
 
 
+def _print_funnel_metrics(segment: str, state) -> None:
+    """Phase 11 — print the funnel drop-off + source contributions for a segment."""
+    try:
+        from orchestrator.nodes import compute_funnel_metrics
+        m = compute_funnel_metrics(state)
+    except Exception:  # noqa: BLE001
+        return
+
+    print(f"\n  Funnel [{segment}]:")
+    for stage, n in m["funnel_drop_off"].items():
+        print(f"    {stage:24s}: {n}")
+    sc = m.get("source_contributions", {})
+    if sc:
+        print("  Source contributions:")
+        for src, n in sc.items():
+            print(f"    {src:12s}: {n}")
+    print(f"  article_link_resolution_rate: {m.get('article_link_resolution_rate', 0):.2f}")
+    print(f"  gemini_retry_count: {m.get('gemini_retry_count', 0)}  "
+          f"gemini_fallback_count: {m.get('gemini_fallback_count', 0)}")
+    print(f"  apify_spend_estimate_usd: ${m.get('apify_spend_estimate_usd', 0):.2f}")
+
+
+def _print_dropped_diagnostics(segment: str, state) -> None:
+    """If 0 qualified, print the dropped list with reasons sorted by frequency."""
+    qual = state.get("qualified_result")
+    if qual is None:
+        return
+    dropped = getattr(qual, "dropped", []) or []
+    if not dropped:
+        return
+    from collections import Counter
+    reasons = Counter()
+    for d in dropped:
+        reason = (d.get("drop_reason") or "unknown") if isinstance(d, dict) else "unknown"
+        # Normalize "pre_score N < threshold" → "pre_score below threshold"
+        if reason.startswith("pre_score"):
+            reason = "pre_score below threshold (40)"
+        elif reason.startswith("score") and "auto_drop" in reason:
+            reason = "gemini score below auto_drop (70)"
+        reasons[reason] += 1
+    print(f"\n  [{segment}] 0 qualified — dropped reasons (most frequent first):")
+    for reason, count in reasons.most_common():
+        print(f"    {count:3d}  {reason}")
+
+
 def _print_consolidated_stats(
     results: dict[str, PipelineState], sheets_url: str = ""
 ) -> None:
@@ -242,6 +287,8 @@ async def _async_main(args: argparse.Namespace) -> int:
             print(f"Running segment: {args.segment} (target={args.target})")
             state = await runner.run_segment(args.segment, target_count=args.target)
             _print_segment_summary(args.segment, state)
+            _print_funnel_metrics(args.segment, state)
+            _print_dropped_diagnostics(args.segment, state)
             _print_consolidated_stats({args.segment: state})
             return 0 if state.get("final_status") in ("success", "partial_success") else 1
 
@@ -264,6 +311,8 @@ async def _async_main(args: argparse.Namespace) -> int:
 
             for seg, state in results.items():
                 _print_segment_summary(seg, state)
+                _print_funnel_metrics(seg, state)
+                _print_dropped_diagnostics(seg, state)
 
             sheets_url = ""
             if settings.SHEET_ID:

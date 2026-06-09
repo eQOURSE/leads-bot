@@ -79,8 +79,24 @@ async def node_hunt(state: "PipelineState", agents: "AgentRegistry") -> dict:
             "Node[%s][%s] found %d candidates in %.1fs",
             segment, name, len(hunt_result.candidates), time.monotonic() - t0,
         )
+        # Phase 11 — capture hunter + gemini resilience metrics into state.
+        # Coerce to plain serializable primitives (checkpointer uses msgpack).
+        raw_hm = getattr(agents.company_hunter, "last_metrics", {}) or {}
+        hunter_metrics = raw_hm if isinstance(raw_hm, dict) else {}
+        gemini_metrics: dict = {}
+        try:
+            g = agents.company_hunter._gemini
+            gemini_metrics = {
+                "retry_count": int(getattr(g, "retry_count", 0) or 0),
+                "fallback_count": int(getattr(g, "fallback_count", 0) or 0),
+                "backoff_seconds": float(getattr(g, "backoff_seconds", 0.0) or 0.0),
+            }
+        except Exception:  # noqa: BLE001
+            gemini_metrics = {}
         return {
             "hunt_result": hunt_result,
+            "_hunter_metrics": hunter_metrics,
+            "_gemini_metrics": gemini_metrics,
             "nodes_completed": _append(state.get("nodes_completed", []), name),
         }
     except Exception as exc:
@@ -402,6 +418,95 @@ async def node_dispatch(state: "PipelineState", agents: "AgentRegistry") -> dict
 # Helper: build run summary dict for Sheets
 # ---------------------------------------------------------------------------
 
+def compute_funnel_metrics(state: "PipelineState") -> dict:
+    """Phase 11 — build the funnel_drop_off + source_contributions metrics dict.
+
+    Computed entirely from the per-segment state result objects (isolated per
+    segment, unlike the shared hunter instance), plus the hunter's last_metrics
+    for source contributions and resolution rate.
+    """
+    hunt = state.get("hunt_result")
+    qual = state.get("qualified_result")
+    enh = state.get("enhanced_result")
+    enr = state.get("enriched_result")
+    msg = state.get("messaged_result")
+    val = state.get("validated_result")
+
+    hunted_raw = 0
+    source_contributions: dict = {}
+    resolution_rate = 0.0
+    after_domain = 0
+    if hunt is not None:
+        source_contributions = dict(getattr(hunt, "source_counts", {}) or {})
+        hunted_raw = sum(source_contributions.values()) or len(getattr(hunt, "candidates", []))
+        after_domain = sum(
+            1 for c in getattr(hunt, "candidates", [])
+            if getattr(c, "domain", "") and not str(getattr(c, "domain", "")).endswith(".unknown")
+        )
+
+    after_dedupe = getattr(hunt, "after_dedupe", 0) if hunt else 0
+
+    # Pre-score / gemini drop-offs from qualifier stats.
+    after_prescore = 0
+    after_gemini = 0
+    if qual is not None:
+        stats = getattr(qual, "stats", {}) or {}
+        qualified_n = len(getattr(qual, "qualified", []))
+        # pre_score_filtered = dropped before gemini; survivors = candidates - dropped
+        dropped_pre = stats.get("pre_score_filtered", 0)
+        hunted_for_qual = len(getattr(hunt, "candidates", [])) if hunt else 0
+        after_prescore = max(hunted_for_qual - dropped_pre, qualified_n)
+        after_gemini = qualified_n
+
+    after_dm = 0
+    if enh is not None:
+        after_dm = sum(len(c.decision_makers) for c in enh.candidates_with_people)
+
+    after_email = 0
+    if enr is not None:
+        after_email = (getattr(enr, "stats", {}) or {}).get("emails_found", 0)
+
+    after_validation = 0
+    ready = needs_review = 0
+    if val is not None:
+        vstats = getattr(val, "stats", {}) or {}
+        ready = vstats.get("ready_to_send", 0)
+        needs_review = vstats.get("needs_review", 0)
+        after_validation = ready + needs_review
+
+    # Pull resolution rate + apify spend from the hunter's last_metrics if present.
+    apify_spend = 0.0
+    hm = state.get("_hunter_metrics") or {}
+    if hm:
+        resolution_rate = hm.get("article_link_resolution_rate", 0.0)
+        apify_spend = hm.get("apify_discovery_spend_estimate_usd", 0.0)
+        if not source_contributions:
+            source_contributions = hm.get("source_contributions", {})
+
+    # Gemini resilience counters (from state if the runner stored them).
+    gem = state.get("_gemini_metrics") or {}
+
+    return {
+        "funnel_drop_off": {
+            "hunted_raw": hunted_raw,
+            "after_domain_resolution": after_domain,
+            "after_dedupe": after_dedupe,
+            "after_prescore_40": after_prescore,
+            "after_gemini_70": after_gemini,
+            "after_dm_found": after_dm,
+            "after_email_found": after_email,
+            "after_validation": after_validation,
+            "ready_to_send": ready,
+            "needs_review": needs_review,
+        },
+        "source_contributions": source_contributions,
+        "article_link_resolution_rate": resolution_rate,
+        "gemini_retry_count": gem.get("retry_count", 0),
+        "gemini_fallback_count": gem.get("fallback_count", 0),
+        "apify_spend_estimate_usd": round(apify_spend, 2),
+    }
+
+
 def _build_run_summary(validated_result, sheets_result: dict, state: "PipelineState") -> dict:
     from sources._utils import utcnow
 
@@ -439,6 +544,7 @@ def _build_run_summary(validated_result, sheets_result: dict, state: "PipelineSt
         "needs_review": validated_result.stats.get("needs_review", 0),
         "rejected": validated_result.stats.get("rejected", 0),
         "api_credits": api_credits,
+        "metrics": compute_funnel_metrics(state),
         "errors": "; ".join(
             f"{k}: {v}" for k, v in (state.get("node_errors") or {}).items()
         ),
@@ -462,6 +568,7 @@ def _build_empty_run_summary(state: "PipelineState") -> dict:
         "needs_review": 0,
         "rejected": 0,
         "api_credits": {},
+        "metrics": compute_funnel_metrics(state),
         "errors": "; ".join(
             f"{k}: {v}" for k, v in (state.get("node_errors") or {}).items()
         ),

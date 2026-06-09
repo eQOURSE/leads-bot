@@ -52,6 +52,8 @@ class CompanyHunter:
         newsdata_client: "NewsDataClient",
         companies_api_client: "CompaniesAPIClient",
         lead_store: "LeadStore",
+        crunchbase_client=None,
+        wellfound_client=None,
     ) -> None:
         self.settings = settings
         self.icp_strategist = icp_strategist
@@ -59,11 +61,15 @@ class CompanyHunter:
         self.serpapi_client = serpapi_client
         self.newsdata_client = newsdata_client
         self.companies_api_client = companies_api_client
+        self.crunchbase_client = crunchbase_client
+        self.wellfound_client = wellfound_client
         self.lead_store = lead_store
         self.log = setup_logging("agent.company_hunter")
         self._gemini = GeminiAgent(
             settings.GEMINI_MODEL_RSS_PARSER, settings
         )
+        # Phase 11 — last-run measurement (read by the runner/CLI).
+        self.last_metrics: dict = {}
 
     # =========================================================================
     # Public API
@@ -88,22 +94,59 @@ class CompanyHunter:
         # 2 — open run record
         run_id = await self.lead_store.create_run(segment)
 
-        # 3 — parallel sub-hunts
-        rss_task, serp_task, news_task = await asyncio.gather(
+        # Reset per-run resilience/resolution metrics on shared clients.
+        try:
+            self.rss_client.reset_resolution_metrics()
+        except Exception:  # noqa: BLE001
+            pass
+
+        # 3 — parallel sub-hunts (RSS, SerpAPI, NewsData + optional Crunchbase, Wellfound)
+        tasks = [
             self._safe_hunt("rss", self._hunt_via_rss(icp), errors),
             self._safe_hunt("serpapi", self._hunt_via_serpapi(icp), errors),
             self._safe_hunt("newsdata", self._hunt_via_newsdata(icp), errors),
+        ]
+        use_crunchbase = (
+            self.crunchbase_client is not None
+            and getattr(self.settings, "ENABLE_CRUNCHBASE_DISCOVERY", True)
         )
+        use_wellfound = (
+            self.wellfound_client is not None
+            and getattr(self.settings, "ENABLE_WELLFOUND_DISCOVERY", True)
+        )
+        if use_crunchbase:
+            tasks.append(self._safe_hunt("crunchbase", self._hunt_via_crunchbase(icp), errors))
+        if use_wellfound:
+            tasks.append(self._safe_hunt("wellfound", self._hunt_via_wellfound(icp), errors))
+
+        results = await asyncio.gather(*tasks)
+
+        rss_task, serp_task, news_task = results[0], results[1], results[2]
+        idx = 3
+        cb_task: list = []
+        wf_task: list = []
+        if use_crunchbase:
+            cb_task = results[idx]; idx += 1
+        if use_wellfound:
+            wf_task = results[idx]; idx += 1
+
         source_counts = {
             "rss": len(rss_task),
             "serpapi": len(serp_task),
             "newsdata": len(news_task),
+            "crunchbase": len(cb_task),
+            "wellfound": len(wf_task),
         }
         api_credits["serpapi"] = 1
         api_credits["newsdata"] = 2
+        if use_crunchbase:
+            api_credits["crunchbase"] = 1
+        if use_wellfound:
+            api_credits["wellfound"] = 1
 
-        # 4 — merge
-        merged = self._merge_candidates(rss_task, serp_task, news_task)
+        # 4 — merge (all sources)
+        merged = self._merge_candidates(rss_task, serp_task, news_task, cb_task, wf_task)
+        hunted_raw = sum(source_counts.values())
 
         # 5 — ICP filter
         filtered = self._apply_icp_filters(merged, icp)
@@ -152,6 +195,31 @@ class CompanyHunter:
 
         completed_at = utcnow()
         duration = time.perf_counter() - start_ts
+
+        # Phase 11 — capture per-run measurement for the runner/CLI.
+        try:
+            resolution_rate = self.rss_client.article_link_resolution_rate
+            resolution_rate = float(resolution_rate)
+        except (TypeError, ValueError, AttributeError):
+            resolution_rate = 0.0
+        if 0.0 < resolution_rate < 0.30:
+            self.log.warning(
+                "Hunter[%s] article_link_resolution_rate=%.2f < 0.30 — extraction weak",
+                segment, resolution_rate,
+            )
+        real_domains = sum(
+            1 for c in final if c.domain and not c.domain.endswith(".unknown")
+        )
+        self.last_metrics = {
+            "source_contributions": dict(source_counts),
+            "hunted_raw": hunted_raw,
+            "after_domain_resolution": real_domains,
+            "after_dedupe": len(after_dedupe),
+            "article_link_resolution_rate": round(resolution_rate, 3),
+            "apify_discovery_spend_estimate_usd": (
+                (1.0 if use_crunchbase else 0.0) + (1.0 if use_wellfound else 0.0)
+            ),
+        }
 
         # 9 — update run record
         await self.lead_store.update_run(
@@ -341,18 +409,49 @@ class CompanyHunter:
         return candidates
 
     # =========================================================================
+    # Phase 11 — Crunchbase & Wellfound discovery
+    # =========================================================================
+
+    async def _hunt_via_crunchbase(self, icp: "IcpStrategy") -> list[CompanyCandidate]:
+        if self.crunchbase_client is None:
+            return []
+        prof = icp.target_company_profile
+        return await self.crunchbase_client.search_recent_funding(
+            industries=icp.target_industries.naics_codes,
+            keywords=icp.target_industries.industry_keywords,
+            funding_stages=[s.lower().replace(" ", "_") for s in prof.funding_stages],
+            days_back=prof.funding_recency_days,
+            country=(prof.geographies.countries[0] if prof.geographies.countries else "United States"),
+            limit=50,
+        )
+
+    async def _hunt_via_wellfound(self, icp: "IcpStrategy") -> list[CompanyCandidate]:
+        if self.wellfound_client is None:
+            return []
+        prof = icp.target_company_profile
+        return await self.wellfound_client.search_recent_startups(
+            industries=icp.target_industries.naics_codes,
+            keywords=icp.target_industries.industry_keywords,
+            founded_after_year=prof.founded_after_year,
+            funding_min=500_000,
+            limit=50,
+        )
+
+    # =========================================================================
     # Merge
     # =========================================================================
 
     def _merge_candidates(
         self,
-        rss: list[CompanyCandidate],
-        serpapi: list[CompanyCandidate],
-        newsdata: list[CompanyCandidate],
+        *source_lists: list[CompanyCandidate],
     ) -> list[CompanyCandidate]:
         merged: dict[str, CompanyCandidate] = {}
 
-        for candidate in [*rss, *serpapi, *newsdata]:
+        all_candidates: list[CompanyCandidate] = []
+        for lst in source_lists:
+            all_candidates.extend(lst or [])
+
+        for candidate in all_candidates:
             key = normalize_domain(candidate.domain)
             if not key:
                 continue

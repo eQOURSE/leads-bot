@@ -18,7 +18,7 @@ import feedparser
 
 from config.settings import Settings
 from sources._gemini import generate_text
-from sources._utils import utcnow
+from sources._utils import normalize_domain, utcnow
 from sources.base import BaseSourceClient
 from sources.models import CompanyCandidate, NewsItem
 
@@ -95,10 +95,48 @@ class RSSFundingMonitor(BaseSourceClient):
         self.log.info("rss_feeds: %s funding-related items from %s feeds", len(items), len(feeds))
         return items
 
+    # Per-run domain-resolution counters (reset each fetch_recent_funding call
+    # via reset_resolution_metrics()). Read by the hunter for measurement.
+    _resolution_attempts: int = 0
+    _resolution_hits: int = 0
+
+    def reset_resolution_metrics(self) -> None:
+        self._resolution_attempts = 0
+        self._resolution_hits = 0
+
+    @property
+    def article_link_resolution_rate(self) -> float:
+        if self._resolution_attempts == 0:
+            return 0.0
+        return self._resolution_hits / self._resolution_attempts
+
     async def extract_company_from_headline(
         self, news_item: NewsItem
     ) -> Optional[CompanyCandidate]:
-        prompt = f"{_EXTRACT_PROMPT}{news_item.title}\n{news_item.snippet}"
+        # Step 1 — try to resolve the real company domain from the article body.
+        resolved_domain: Optional[str] = None
+        if news_item.url:
+            self._resolution_attempts += 1
+            try:
+                from sources._article_extract import resolve_company_domain
+                resolved_domain = await resolve_company_domain(news_item.url, self.settings)
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("article domain resolution error (%s): %s", news_item.url, exc)
+            if resolved_domain:
+                self._resolution_hits += 1
+
+        # Step 2 — Gemini extraction. If we have candidate domain(s), let the
+        # model confirm/choose; otherwise just extract company facts.
+        if resolved_domain:
+            prompt = (
+                f"{_EXTRACT_PROMPT}{news_item.title}\n{news_item.snippet}\n\n"
+                f"Candidate company domain from the article body: {resolved_domain}. "
+                "Include a 'domain' field set to this domain if it plausibly "
+                "belongs to the funded company, else null."
+            )
+        else:
+            prompt = f"{_EXTRACT_PROMPT}{news_item.title}\n{news_item.snippet}"
+
         raw = await generate_text(self.settings, self.model, prompt)
         if not raw:
             return None
@@ -111,8 +149,13 @@ class RSSFundingMonitor(BaseSourceClient):
         if not company_name:
             return None
 
+        # Prefer: model-confirmed domain → article-resolved domain → slug.
+        model_domain = parsed.get("domain")
+        domain = (
+            normalize_domain(model_domain) if model_domain else ""
+        ) or resolved_domain or self._guess_domain(company_name)
+
         funding_date = self._parse_iso_date(parsed.get("announcement_date"))
-        domain = self._guess_domain(company_name)
         try:
             return CompanyCandidate(
                 domain=domain,
@@ -122,7 +165,8 @@ class RSSFundingMonitor(BaseSourceClient):
                 funding_date=funding_date,
                 funding_source=news_item.source_name,
                 raw_source="rss_feeds",
-                confidence=0.5,
+                # Higher confidence when we resolved a real domain.
+                confidence=0.65 if domain and not domain.endswith(".unknown") else 0.5,
             )
         except Exception as exc:  # noqa: BLE001
             self.log.warning("rss company extraction skipped: %s", exc)

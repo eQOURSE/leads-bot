@@ -36,6 +36,39 @@ T = TypeVar("T", bound=BaseModel)
 _MAX_JSON_RETRIES = 2
 _BATCH_CONCURRENCY = 5
 
+# Phase 11 — rate-limit retry/fallback policy.
+_PRIMARY_ATTEMPTS = 3          # attempts on the configured model
+_FALLBACK_ATTEMPTS = 2         # attempts on the fallback model after primary fails
+_BACKOFF_SCHEDULE = [1.0, 4.0, 16.0]  # seconds; index by attempt number
+
+
+def _is_rate_limit_error(exc: BaseException) -> bool:
+    """True for 429 (ResourceExhausted) / 503 (ServiceUnavailable)-type errors.
+
+    Detected structurally (google.api_core exceptions) and by message text, so
+    it works whether the SDK raises typed exceptions or generic ones.
+    """
+    name = type(exc).__name__
+    if name in ("ResourceExhausted", "ServiceUnavailable", "TooManyRequests"):
+        return True
+    msg = str(exc).lower()
+    if "429" in msg or "resource_exhausted" in msg or "resourceexhausted" in msg:
+        return True
+    if "503" in msg or "unavailable" in msg or "overloaded" in msg:
+        return True
+    if "rate limit" in msg or "quota" in msg:
+        return True
+    return False
+
+
+def _is_non_retryable_error(exc: BaseException) -> bool:
+    """True for errors we must NOT retry (bad request, auth, permission)."""
+    name = type(exc).__name__
+    if name in ("InvalidArgument", "PermissionDenied", "Unauthenticated", "NotFound"):
+        return True
+    msg = str(exc).lower()
+    return "400" in msg or "401" in msg or "403" in msg or "permission" in msg
+
 
 class GeminiAgent:
     """Shared Gemini client for agents."""
@@ -45,6 +78,15 @@ class GeminiAgent:
         self.settings = settings
         self.log = setup_logging(f"agent.gemini.{model_name}")
         self._usage_source = f"gemini_{model_name}"
+        # Phase 11 — per-instance resilience counters (read by the runner).
+        self.retry_count = 0
+        self.fallback_count = 0
+        self.backoff_seconds = 0.0
+
+    def reset_resilience_metrics(self) -> None:
+        self.retry_count = 0
+        self.fallback_count = 0
+        self.backoff_seconds = 0.0
 
     # ----- client construction -------------------------------------------------
 
@@ -80,11 +122,13 @@ class GeminiAgent:
         max_tokens: Optional[int],
         as_json: bool,
         schema: Optional[Type[BaseModel]],
+        model_name: Optional[str] = None,
     ) -> tuple[str, Optional[int]]:
         """Return (text, total_token_count). Runs in a thread."""
         from google.genai import types
 
         client = self._build_client()
+        active_model = model_name or self.model_name
 
         config_kwargs: dict = {"temperature": temperature}
         if max_tokens is not None:
@@ -96,7 +140,7 @@ class GeminiAgent:
 
         config = types.GenerateContentConfig(**config_kwargs)
         resp = client.models.generate_content(
-            model=self.model_name, contents=prompt, config=config
+            model=active_model, contents=prompt, config=config
         )
 
         text = (getattr(resp, "text", "") or "").strip()
@@ -115,29 +159,82 @@ class GeminiAgent:
         as_json: bool = False,
         schema: Optional[Type[BaseModel]] = None,
     ) -> Optional[str]:
-        """Perform one Gemini call with timing, logging and usage tracking."""
-        start = time.perf_counter()
-        try:
-            text, tokens = await asyncio.to_thread(
-                self._generate_sync, prompt, temperature, max_tokens, as_json, schema
-            )
-        except Exception as exc:  # noqa: BLE001
-            self.log.error("Gemini call failed (model=%s): %s", self.model_name, exc)
-            return None
+        """Perform one Gemini call with retry + model fallback on rate limits.
 
-        latency_ms = (time.perf_counter() - start) * 1000.0
-        self.log.info(
-            "gemini | model=%s | tokens=%s | latency=%.0fms | json=%s",
-            self.model_name,
-            tokens if tokens is not None else "unknown",
-            latency_ms,
-            as_json,
+        Ladder:
+          1. Up to 3 attempts on the configured model, backoff 1s/4s/16s.
+          2. Then up to 2 attempts on settings.GEMINI_MODEL_FALLBACK.
+          3. Return None after all attempts (existing graceful degradation).
+
+        Non-rate-limit errors (400/401/403, bad schema) are NOT retried.
+        """
+        fallback_model = getattr(self.settings, "GEMINI_MODEL_FALLBACK", None)
+        # Build the attempt plan: (model_name, is_fallback) tuples.
+        plan: list[tuple[str, bool]] = [(self.model_name, False)] * _PRIMARY_ATTEMPTS
+        if fallback_model and fallback_model != self.model_name:
+            plan += [(fallback_model, True)] * _FALLBACK_ATTEMPTS
+
+        start = time.perf_counter()
+        last_exc: Optional[BaseException] = None
+        served_model = self.model_name
+        attempt_idx = 0
+
+        for model_name, is_fallback in plan:
+            try:
+                text, tokens = await asyncio.to_thread(
+                    self._generate_sync,
+                    prompt, temperature, max_tokens, as_json, schema, model_name,
+                )
+                served_model = model_name
+                if is_fallback:
+                    self.fallback_count += 1
+                # Success — log, track usage, return.
+                latency_ms = (time.perf_counter() - start) * 1000.0
+                self.log.info(
+                    "gemini | model=%s | tokens=%s | latency=%.0fms | json=%s | "
+                    "retries=%d | fallback=%s",
+                    served_model,
+                    tokens if tokens is not None else "unknown",
+                    latency_ms, as_json, self.retry_count, is_fallback,
+                )
+                await self._track_usage_safe(served_model)
+                return text
+            except Exception as exc:  # noqa: BLE001
+                last_exc = exc
+                if _is_non_retryable_error(exc):
+                    self.log.error(
+                        "Gemini non-retryable error (model=%s): %s", model_name, exc
+                    )
+                    return None
+                if not _is_rate_limit_error(exc):
+                    # Unknown transient error — log and try next attempt anyway.
+                    self.log.warning(
+                        "Gemini call error (model=%s): %s", model_name, exc
+                    )
+                # Backoff before next attempt (skip wait on the very last one).
+                is_last = attempt_idx == len(plan) - 1
+                if not is_last:
+                    self.retry_count += 1
+                    wait = _BACKOFF_SCHEDULE[min(attempt_idx, len(_BACKOFF_SCHEDULE) - 1)]
+                    self.backoff_seconds += wait
+                    self.log.warning(
+                        "Gemini rate-limited (model=%s), backing off %.0fs "
+                        "(attempt %d/%d)",
+                        model_name, wait, attempt_idx + 1, len(plan),
+                    )
+                    await asyncio.sleep(wait)
+            attempt_idx += 1
+
+        self.log.error(
+            "Gemini failed after %d attempts (last error: %s)", len(plan), last_exc
         )
+        return None
+
+    async def _track_usage_safe(self, model: str) -> None:
         try:
-            await track_usage(self._usage_source, 1, None, self.settings)
+            await track_usage(f"gemini_{model}", 1, None, self.settings)
         except Exception as exc:  # noqa: BLE001
             self.log.warning("Failed to track gemini usage: %s", exc)
-        return text
 
     # ----- public API ----------------------------------------------------------
 

@@ -31,6 +31,8 @@ class AgentRegistry:
         from sources.rss_feeds import RSSFundingMonitor
         from sources.abstract_api_client import AbstractAPIClient
         from sources.smtp_verifier import SMTPVerifier
+        from sources.crunchbase_apify import CrunchbaseAPIfyClient
+        from sources.wellfound_apify import WellfoundAPIfyClient
 
         self.vibe = VibeProspectingClient(settings)
         self.hunter = HunterClient(settings)
@@ -42,6 +44,8 @@ class AgentRegistry:
         self.rss = RSSFundingMonitor(settings)
         self.abstract = AbstractAPIClient(settings)
         self.smtp = SMTPVerifier(settings)
+        self.crunchbase = CrunchbaseAPIfyClient(settings)
+        self.wellfound = WellfoundAPIfyClient(settings)
 
         # ---- Lead store (Phase 2) ----
         from sinks.sqlite_store import LeadStore
@@ -74,6 +78,8 @@ class AgentRegistry:
             self.newsdata,
             self.companies,
             self.lead_store,
+            crunchbase_client=self.crunchbase,
+            wellfound_client=self.wellfound,
         )
 
         self.qualifier = Qualifier(
