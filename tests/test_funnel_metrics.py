@@ -70,6 +70,9 @@ async def test_hunter_integrates_crunchbase_and_wellfound(test_settings):
     from agents.company_hunter import CompanyHunter
     from sources.models import CompanyCandidate
 
+    test_settings.ENABLE_CRUNCHBASE_DISCOVERY = True
+    test_settings.ENABLE_WELLFOUND_DISCOVERY = True
+
     icp_strategist = MagicMock()
     icp = MagicMock()
     icp.target_industries.naics_codes = ["541512"]

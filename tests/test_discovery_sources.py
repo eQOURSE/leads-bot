@@ -67,6 +67,7 @@ def _cb_items():
 
 @pytest.mark.asyncio
 async def test_crunchbase_maps_items_to_candidates(test_settings):
+    test_settings.ENABLE_CRUNCHBASE_DISCOVERY = True
     client = CrunchbaseAPIfyClient(test_settings)
 
     async def fake_request(self, c, method, url, **kwargs):
@@ -94,6 +95,7 @@ async def test_crunchbase_maps_items_to_candidates(test_settings):
 
 @pytest.mark.asyncio
 async def test_crunchbase_returns_empty_on_error(test_settings):
+    test_settings.ENABLE_CRUNCHBASE_DISCOVERY = True
     client = CrunchbaseAPIfyClient(test_settings)
 
     async def boom(self, c, method, url, **kwargs):
@@ -106,6 +108,7 @@ async def test_crunchbase_returns_empty_on_error(test_settings):
 
 @pytest.mark.asyncio
 async def test_crunchbase_no_tokens_returns_empty(test_settings):
+    test_settings.ENABLE_CRUNCHBASE_DISCOVERY = True
     # Strip tokens
     test_settings.APIFY_TOKEN_1 = None
     test_settings.APIFY_TOKEN_2 = None
@@ -133,6 +136,7 @@ def _wf_items():
 
 @pytest.mark.asyncio
 async def test_wellfound_maps_items(test_settings):
+    test_settings.ENABLE_WELLFOUND_DISCOVERY = True
     client = WellfoundAPIfyClient(test_settings)
 
     async def fake_request(self, c, method, url, **kwargs):

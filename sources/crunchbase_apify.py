@@ -61,6 +61,9 @@ class CrunchbaseAPIfyClient(BaseSourceClient):
         keywords: Optional[list[str]] = None,
     ) -> list[CompanyCandidate]:
         """Return recently-funded companies as CompanyCandidates. [] on failure."""
+        if not getattr(self.settings, "ENABLE_CRUNCHBASE_DISCOVERY", False):
+            self.log.info("CrunchbaseAPIfyClient disabled via ENABLE_CRUNCHBASE_DISCOVERY")
+            return []
         token = self._pick_token()
         if not token:
             self.log.warning("crunchbase: no Apify token available")

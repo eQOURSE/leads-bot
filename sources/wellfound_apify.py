@@ -55,6 +55,9 @@ class WellfoundAPIfyClient(BaseSourceClient):
         keywords: Optional[list[str]] = None,
     ) -> list[CompanyCandidate]:
         """Return startups matching the markets as CompanyCandidates. [] on failure."""
+        if not getattr(self.settings, "ENABLE_WELLFOUND_DISCOVERY", False):
+            self.log.info("WellfoundAPIfyClient disabled via ENABLE_WELLFOUND_DISCOVERY")
+            return []
         token = self._pick_token()
         if not token:
             self.log.warning("wellfound: no Apify token available")

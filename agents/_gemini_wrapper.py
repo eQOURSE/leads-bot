@@ -82,6 +82,11 @@ class GeminiAgent:
         self.retry_count = 0
         self.fallback_count = 0
         self.backoff_seconds = 0.0
+        # Phase 12 — build the client once and reuse it; log the active mode.
+        self._client = None
+        self.log.info(
+            "GeminiAgent[%s] using %s auth", model_name, settings.gemini_auth_mode
+        )
 
     def reset_resilience_metrics(self) -> None:
         self.retry_count = 0
@@ -95,8 +100,6 @@ class GeminiAgent:
         from google import genai
 
         mode = self.settings.gemini_auth_mode
-        if mode == "ai_studio":
-            return genai.Client(api_key=self.settings.GEMINI_API_KEY)
         if mode == "vertex":
             import os
 
@@ -109,9 +112,17 @@ class GeminiAgent:
                 project=self.settings.GCP_PROJECT_ID,
                 location=self.settings.GCP_REGION,
             )
+        if mode == "ai_studio":
+            return genai.Client(api_key=self.settings.GEMINI_API_KEY)
         raise RuntimeError(
             "No Gemini auth configured (set GEMINI_API_KEY or configure Vertex)."
         )
+
+    def _get_client(self):
+        """Return the cached client, building it once on first use."""
+        if self._client is None:
+            self._client = self._build_client()
+        return self._client
 
     # ----- low-level sync calls (run in worker threads) ------------------------
 
@@ -127,7 +138,7 @@ class GeminiAgent:
         """Return (text, total_token_count). Runs in a thread."""
         from google.genai import types
 
-        client = self._build_client()
+        client = self._get_client()
         active_model = model_name or self.model_name
 
         config_kwargs: dict = {"temperature": temperature}

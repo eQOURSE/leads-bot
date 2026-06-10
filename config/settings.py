@@ -26,9 +26,12 @@ class Settings(BaseSettings):
 
     # === Gemini auth ===
     # Two ways to authenticate to Gemini:
-    #   1. AI Studio (Gemini Developer API): set GEMINI_API_KEY only.
-    #   2. Vertex AI: set GCP_PROJECT_ID + GCP_REGION + a service account JSON.
+    #   1. Vertex AI (production): set GCP_PROJECT_ID + GCP_REGION + service
+    #      account JSON, and keep USE_VERTEX_AI=true (default). Higher quotas.
+    #   2. AI Studio (Gemini Developer API): set GEMINI_API_KEY only. Free tier
+    #      with tight rate limits — used as a fallback.
     GEMINI_API_KEY: Optional[str] = None
+    USE_VERTEX_AI: bool = True  # prefer Vertex for production reliability
 
     # === GCP / Vertex AI (optional — only needed for Vertex or Google Sheets) ===
     GCP_PROJECT_ID: Optional[str] = None
@@ -55,10 +58,12 @@ class Settings(BaseSettings):
     COMPANIES_API_TOKEN: Optional[str] = None
 
     # === Phase 11 — Apify discovery actors (overridable) ===
+    # Default OFF until a working actor slug is verified on apify.com/store.
+    # Set the slug and flip the matching ENABLE_* flag to true to turn on.
     CRUNCHBASE_APIFY_ACTOR: Optional[str] = None
     WELLFOUND_APIFY_ACTOR: Optional[str] = None
-    ENABLE_CRUNCHBASE_DISCOVERY: bool = True
-    ENABLE_WELLFOUND_DISCOVERY: bool = True
+    ENABLE_CRUNCHBASE_DISCOVERY: bool = False
+    ENABLE_WELLFOUND_DISCOVERY: bool = False
 
     # === Parked (not wired in Phase 1) ===
     ABSTRACT_EMAIL_API_KEY: Optional[str] = None
@@ -131,12 +136,16 @@ class Settings(BaseSettings):
     def gemini_auth_mode(self) -> Optional[str]:
         """How Gemini will authenticate.
 
-        Returns ``"ai_studio"`` if a Gemini Developer API key is set,
-        ``"vertex"`` if GCP/Vertex is fully configured, else ``None``.
-        AI Studio takes precedence since it is the simpler path.
+        Precedence (Phase 12): prefer Vertex AI for production reliability when
+        ``USE_VERTEX_AI`` is true AND GCP project + service-account creds are
+        configured. Otherwise fall back to AI Studio if a developer key is set.
+        Returns ``"vertex"``, ``"ai_studio"``, or ``None`` if neither works.
         """
+        if self.USE_VERTEX_AI and self.is_gcp_configured:
+            return "vertex"
         if self.GEMINI_API_KEY and self.GEMINI_API_KEY.strip():
             return "ai_studio"
+        # If Vertex was requested but creds are missing, still allow AI Studio.
         if self.is_gcp_configured:
             return "vertex"
         return None

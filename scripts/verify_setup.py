@@ -112,6 +112,65 @@ def check_settings() -> bool:
     return all_present
 
 
+def check_vertex_ai() -> bool:
+    """Phase 12 — live Vertex AI smoke test (only when auth mode is vertex).
+
+    Makes one tiny generation call to confirm the Vertex AI API is enabled and
+    the service account has access. Prints actionable gcloud commands on failure.
+    """
+    print("\n[1b] Vertex AI access")
+    print("-" * 50)
+    settings = get_settings()
+    mode = settings.gemini_auth_mode
+
+    print(f"  Gemini auth mode: {mode}")
+    if mode != "vertex":
+        print("  (skipped — not using Vertex; set USE_VERTEX_AI=true + GCP creds)")
+        return True  # not a failure; AI Studio path is allowed
+
+    import time as _time
+    try:
+        from google import genai
+        import os
+
+        os.environ.setdefault(
+            "GOOGLE_APPLICATION_CREDENTIALS", settings.GOOGLE_APPLICATION_CREDENTIALS
+        )
+        client = genai.Client(
+            vertexai=True,
+            project=settings.GCP_PROJECT_ID,
+            location=settings.GCP_REGION,
+        )
+        t0 = _time.perf_counter()
+        result = client.models.generate_content(
+            model="gemini-2.5-flash-lite",
+            contents="Return the word 'ok' and nothing else.",
+        )
+        elapsed = _time.perf_counter() - t0
+        text = (getattr(result, "text", "") or "").strip()
+        if "ok" in text.lower():
+            print(f"  Vertex AI test call: PASS (responded in {elapsed:.1f}s)")
+            return True
+        print(f"  Vertex AI test call: WARN — unexpected response: {text!r}")
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f"  Vertex AI test call: FAIL: {exc}")
+        _print_vertex_fix_commands(settings)
+        return False
+
+
+def _print_vertex_fix_commands(settings) -> None:
+    project = settings.GCP_PROJECT_ID or "<your-project-id>"
+    print("\n  To fix Vertex AI access, run these (requires gcloud + project owner):")
+    print(f"    gcloud services enable aiplatform.googleapis.com --project={project}")
+    print(
+        "    gcloud projects add-iam-policy-binding " + project + " \\\n"
+        "      --member=\"serviceAccount:lead-gen-agent@" + project + ".iam.gserviceaccount.com\" \\\n"
+        "      --role=\"roles/aiplatform.user\""
+    )
+    print("  Also confirm billing is enabled on the GCP project (Vertex requires it).")
+
+
 def check_imports() -> bool:
     """Import every declared dependency. Returns True if all succeed."""
     print("\n[2] Dependency imports")
@@ -156,11 +215,15 @@ def check_database() -> bool:
 
 
 def main() -> int:
+    import sys as _sys
+    run_vertex = "--no-vertex" not in _sys.argv
+
     print("=" * 50)
-    print("Phase 0 setup verification (no external API calls)")
+    print("Setup verification")
     print("=" * 50)
 
     settings_ok = check_settings()
+    vertex_ok = check_vertex_ai() if run_vertex else True
     imports_ok = check_imports()
     db_ok = check_database()
 
@@ -168,6 +231,8 @@ def main() -> int:
     print("SUMMARY")
     print("=" * 50)
     print(f"  Settings (Tier-1 keys present) : {'PASS' if settings_ok else 'FAIL'}")
+    if run_vertex:
+        print(f"  Vertex AI access               : {'PASS' if vertex_ok else 'FAIL'}")
     print(f"  Dependency imports             : {'PASS' if imports_ok else 'FAIL'}")
     print(f"  Database schema                : {'PASS' if db_ok else 'FAIL'}")
 
