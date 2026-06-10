@@ -435,16 +435,24 @@ def compute_funnel_metrics(state: "PipelineState") -> dict:
     hunted_raw = 0
     source_contributions: dict = {}
     resolution_rate = 0.0
-    after_domain = 0
+    real_domain_count = 0       # candidates with a resolved (non-.unknown) domain
+    merged_count = 0
+    after_filter = 0
+    after_dedupe = 0
     if hunt is not None:
         source_contributions = dict(getattr(hunt, "source_counts", {}) or {})
+        # Raw items emitted by all discovery sources before any merge/filter.
         hunted_raw = sum(source_contributions.values()) or len(getattr(hunt, "candidates", []))
-        after_domain = sum(
+        merged_count = getattr(hunt, "merged_count", 0)
+        after_filter = getattr(hunt, "after_filter", 0)
+        after_dedupe = getattr(hunt, "after_dedupe", 0)
+        # How many of the FINAL candidates carry a real (non-.unknown) domain.
+        # NOTE: this is a quality measure on the post-dedupe list, NOT a funnel
+        # stage between hunted_raw and dedupe.
+        real_domain_count = sum(
             1 for c in getattr(hunt, "candidates", [])
             if getattr(c, "domain", "") and not str(getattr(c, "domain", "")).endswith(".unknown")
         )
-
-    after_dedupe = getattr(hunt, "after_dedupe", 0) if hunt else 0
 
     # Pre-score / gemini drop-offs from qualifier stats.
     after_prescore = 0
@@ -489,7 +497,8 @@ def compute_funnel_metrics(state: "PipelineState") -> dict:
     return {
         "funnel_drop_off": {
             "hunted_raw": hunted_raw,
-            "after_domain_resolution": after_domain,
+            "after_merge": merged_count,
+            "after_icp_filter": after_filter,
             "after_dedupe": after_dedupe,
             "after_prescore_40": after_prescore,
             "after_gemini_70": after_gemini,
@@ -499,6 +508,9 @@ def compute_funnel_metrics(state: "PipelineState") -> dict:
             "ready_to_send": ready,
             "needs_review": needs_review,
         },
+        # Quality measure (NOT a funnel stage): how many FINAL candidates have a
+        # real domain, plus the rate at which RSS article-extraction succeeds.
+        "real_domain_count": real_domain_count,
         "source_contributions": source_contributions,
         "article_link_resolution_rate": resolution_rate,
         "gemini_retry_count": gem.get("retry_count", 0),

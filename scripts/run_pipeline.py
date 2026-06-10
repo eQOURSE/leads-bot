@@ -140,6 +140,7 @@ def _print_funnel_metrics(segment: str, state) -> None:
     print(f"\n  Funnel [{segment}]:")
     for stage, n in m["funnel_drop_off"].items():
         print(f"    {stage:24s}: {n}")
+    print(f"  real_domain_count (of final): {m.get('real_domain_count', 0)}")
     sc = m.get("source_contributions", {})
     if sc:
         print("  Source contributions:")

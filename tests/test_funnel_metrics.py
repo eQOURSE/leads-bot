@@ -57,7 +57,7 @@ def test_compute_funnel_metrics_with_results():
 
     m = compute_funnel_metrics(state)
     assert m["funnel_drop_off"]["hunted_raw"] == 2
-    assert m["funnel_drop_off"]["after_domain_resolution"] == 1  # only real.com
+    assert m["real_domain_count"] == 1  # only real.com has a non-.unknown domain
     assert m["article_link_resolution_rate"] == 0.5
     assert m["gemini_retry_count"] == 2
     assert m["gemini_fallback_count"] == 1
