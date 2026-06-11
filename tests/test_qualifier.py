@@ -350,8 +350,8 @@ async def test_tier_assignment_uses_icp_thresholds(test_settings):
     #     Gemini: seg=15, buy=14 → total=99 → tier_1
     # c2: fr=40 + reach=5(real dom, no website) + geo=10(US) + size=10 = 65
     #     Gemini: seg=8, buy=5 → total=78 → tier_2 (70<=78<85)
-    # c3: fr=40 + reach=5 + geo=10 + size=10 = 65
-    #     Gemini: seg=0, buy=0 → total=65 → dropped (<70)
+    # c3: fr=20(200d) + reach=5 + geo=10 + size=10 = 45, +10 baseline = 55
+    #     Gemini: seg=0, buy=0 → total=55 → dropped (<70 auto_drop_below)
 
     call_counter = {"n": 0}
 
@@ -381,7 +381,7 @@ async def test_tier_assignment_uses_icp_thresholds(test_settings):
                          description="EdTech platform K-12", website="https://co1.com")
     c2 = _make_candidate("co2.com", "Co2", funding_date=_days_ago(30),
                          hq_country="United States", size_range="51-200")
-    c3 = _make_candidate("co3.com", "Co3", funding_date=_days_ago(30),
+    c3 = _make_candidate("co3.com", "Co3", funding_date=_days_ago(200),
                          hq_country="United States", size_range="51-200")
 
     hunt = _make_hunt_result([c1, c2, c3])

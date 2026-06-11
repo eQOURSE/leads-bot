@@ -519,10 +519,30 @@ def compute_funnel_metrics(state: "PipelineState") -> dict:
     }
 
 
+def _run_status(funnel: dict, node_errors: dict) -> str:
+    """Phase 13 status labels driven by real funnel numbers.
+
+    - "empty_run"          : discovery found nothing (hunted_raw == 0)
+    - "success"            : at least one ready_to_send lead
+    - "completed_no_leads" : ran fully but produced no ready leads
+    - "failed"             : a node crashed and there's no usable output
+    """
+    fd = funnel.get("funnel_drop_off", {})
+    hunted = fd.get("hunted_raw", 0)
+    ready = fd.get("ready_to_send", 0)
+    if ready and ready > 0:
+        return "success"
+    if hunted == 0:
+        return "failed" if node_errors else "empty_run"
+    return "completed_no_leads"
+
+
 def _build_run_summary(validated_result, sheets_result: dict, state: "PipelineState") -> dict:
+    """Build a Run History row for a completed run. Visible numeric columns are
+    sourced from the funnel metrics so they're always accurate (Phase 13)."""
     from sources._utils import utcnow
 
-    # Collect api_credits from all result objects
+    # Aggregate api_credits across phases.
     api_credits: dict = {}
     for key in ("hunt_result", "qualified_result", "enhanced_result",
                 "enriched_result", "messaged_result", "validated_result"):
@@ -532,58 +552,73 @@ def _build_run_summary(validated_result, sheets_result: dict, state: "PipelineSt
             for k, v in credits.items():
                 api_credits[k] = api_credits.get(k, 0) + v
 
-    hunt_result = state.get("hunt_result")
-    qualified_result = state.get("qualified_result")
-    enhanced_result = state.get("enhanced_result")
-    enriched_result = state.get("enriched_result")
-    messaged_result = state.get("messaged_result")
+    metrics = compute_funnel_metrics(state)
+    fd = metrics["funnel_drop_off"]
+    node_errors = state.get("node_errors") or {}
+
+    duration = getattr(validated_result, "duration_seconds", 0.0) if validated_result else 0.0
+    run_id = (
+        getattr(validated_result, "run_id", None)
+        or state.get("run_id", "unknown")
+    )
+    segment = (
+        getattr(validated_result, "segment", None)
+        or state.get("segment", "unknown")
+    )
+
+    rejected = max(0, fd["after_dm_found"] - fd["ready_to_send"] - fd["needs_review"])
 
     return {
         "date": utcnow().strftime("%Y-%m-%d %H:%M"),
-        "run_id": validated_result.run_id,
-        "segment": validated_result.segment,
-        "status": "completed",
-        "duration_s": f"{validated_result.duration_seconds:.1f}",
-        "candidates_hunted": len(hunt_result.candidates) if hunt_result else 0,
-        "qualified": len(qualified_result.qualified) if qualified_result else 0,
-        "dms_found": (
-            sum(len(c.decision_makers) for c in enhanced_result.candidates_with_people)
-            if enhanced_result else 0
-        ),
-        "emails_found": enriched_result.stats.get("emails_found", 0) if enriched_result else 0,
-        "messages_generated": messaged_result.stats.get("messages_generated", 0) if messaged_result else 0,
-        "ready_to_send": validated_result.stats.get("ready_to_send", 0),
-        "needs_review": validated_result.stats.get("needs_review", 0),
-        "rejected": validated_result.stats.get("rejected", 0),
+        "run_id": run_id,
+        "segment": segment,
+        "status": _run_status(metrics, node_errors),
+        "duration_s": f"{duration:.1f}",
+        "candidates_hunted": fd["hunted_raw"],
+        "qualified": fd["after_gemini_70"],
+        "dms_found": fd["after_dm_found"],
+        "emails_found": fd["after_email_found"],
+        "messages_generated": fd["after_validation"],
+        "ready_to_send": fd["ready_to_send"],
+        "needs_review": fd["needs_review"],
+        "rejected": rejected,
         "api_credits": api_credits,
-        "metrics": compute_funnel_metrics(state),
-        "errors": "; ".join(
-            f"{k}: {v}" for k, v in (state.get("node_errors") or {}).items()
-        ),
+        "metrics": metrics,
+        "errors": "; ".join(f"{k}: {v}" for k, v in node_errors.items()),
     }
 
 
 def _build_empty_run_summary(state: "PipelineState") -> dict:
+    """Run History row for a run that produced no validated leads.
+
+    Phase 13: visible columns are now sourced from the funnel metrics (not
+    hardcoded zeros), and the status reflects whether discovery found anything.
+    """
     from sources._utils import utcnow
+
+    metrics = compute_funnel_metrics(state)
+    fd = metrics["funnel_drop_off"]
+    node_errors = state.get("node_errors") or {}
+    rejected = max(0, fd["after_dm_found"] - fd["ready_to_send"] - fd["needs_review"])
+
     return {
         "date": utcnow().strftime("%Y-%m-%d %H:%M"),
         "run_id": state.get("run_id", "unknown"),
         "segment": state.get("segment", "unknown"),
-        "status": "empty_run",
-        "duration_s": "0",
-        "candidates_hunted": 0,
-        "qualified": 0,
-        "dms_found": 0,
-        "emails_found": 0,
-        "messages_generated": 0,
-        "ready_to_send": 0,
-        "needs_review": 0,
-        "rejected": 0,
+        "status": _run_status(metrics, node_errors),
+        "duration_s": f"{state.get('duration_seconds') or 0:.0f}"
+        if isinstance(state.get("duration_seconds"), (int, float)) else "0",
+        "candidates_hunted": fd["hunted_raw"],
+        "qualified": fd["after_gemini_70"],
+        "dms_found": fd["after_dm_found"],
+        "emails_found": fd["after_email_found"],
+        "messages_generated": fd["after_validation"],
+        "ready_to_send": fd["ready_to_send"],
+        "needs_review": fd["needs_review"],
+        "rejected": rejected,
         "api_credits": {},
-        "metrics": compute_funnel_metrics(state),
-        "errors": "; ".join(
-            f"{k}: {v}" for k, v in (state.get("node_errors") or {}).items()
-        ),
+        "metrics": metrics,
+        "errors": "; ".join(f"{k}: {v}" for k, v in node_errors.items()),
     }
 
 

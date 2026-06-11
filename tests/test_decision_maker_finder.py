@@ -244,7 +244,7 @@ async def test_scrapegraph_failure_skips_apify_for_tier_2(
     assert not mock_apify_client.google_search.called
 
     cwp = result.candidates_with_people[0]
-    assert cwp.lookup_attempts.get("apify") == "not_attempted_tier2"
+    assert cwp.lookup_attempts.get("apify") == "not_attempted"
 
 
 @pytest.mark.asyncio

@@ -136,9 +136,12 @@ class Qualifier:
         # 2 — pre-score every candidate
         prescored: list[tuple[CompanyCandidate, int, dict]] = []
         auto_dropped: list[dict] = []
+        baseline_bonus_count = 0
 
         for c in candidates:
             pre_score, sub = self._pre_score(c, icp)
+            if sub.get("baseline_bonus_applied"):
+                baseline_bonus_count += 1
             if pre_score == 0 and sub.get("auto_drop_reason"):
                 auto_dropped.append({
                     "candidate_name": c.name,
@@ -156,6 +159,7 @@ class Qualifier:
             prescored.append((c, pre_score, sub))
 
         stats["pre_score_filtered"] = len(auto_dropped)
+        stats["prescore_baseline_bonus_applied"] = baseline_bonus_count
         self.log.info(
             "Qualifier[%s] %d candidates, %d passed pre-score (>=40), %d auto-dropped",
             segment, len(candidates), len(prescored), len(auto_dropped),
@@ -387,7 +391,31 @@ class Qualifier:
             size = 0
         sub["size_match"] = size
 
-        total = min(70, fr + reach + geo + size)
+        base_score = fr + reach + geo + size
+
+        # --- Phase 13: minimum-viable-candidate baseline bonus ---
+        # RSS-extracted candidates usually lack size_range/revenue_range, so they
+        # cap out ~35-40 even when they're strong prospects. If a candidate has
+        # the three signals we genuinely care about — a real (resolvable) domain,
+        # a recent funding date, and an acceptable geography — give +10 so it can
+        # clear the 40 gate and reach Gemini for the real judgment.
+        from agents._constants import domain_is_news_source
+
+        has_real_domain = bool(
+            candidate.domain
+            and not candidate.domain.endswith(".unknown")
+            and not domain_is_news_source(candidate.domain)
+        )
+        has_funding_date = candidate.funding_date is not None and fr > 0
+        geography_ok = geo > 0  # matched ICP geo, or no restriction, or benefit-of-doubt
+
+        baseline_applied = False
+        if has_real_domain and has_funding_date and geography_ok:
+            base_score += 10
+            baseline_applied = True
+        sub["baseline_bonus_applied"] = baseline_applied
+
+        total = min(70, base_score)
         return total, sub
 
     # =========================================================================

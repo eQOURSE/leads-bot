@@ -42,7 +42,7 @@ _RUN_HISTORY_HEADERS = [
     "Date", "Run ID", "Segment", "Status", "Duration (s)",
     "Candidates Hunted", "Qualified", "DMs Found", "Emails Found",
     "Messages Generated", "Ready to Send", "Needs Review",
-    "Rejected", "API Credits Used", "Metrics", "Errors",
+    "Rejected", "API Credits", "Funnel Metrics", "Errors",
 ]
 
 # Tab names that are always present
@@ -315,6 +315,19 @@ class GoogleSheetsSink:
         except Exception as exc:
             self.log.error("google_sheets: run history init failed: %s", exc)
             return
+
+        # Phase 13 — reconcile header on existing tabs created with old columns
+        # (e.g. before the Funnel Metrics column existed). One-time self-heal.
+        try:
+            current_header = ws.row_values(1)
+            if current_header[: len(_RUN_HISTORY_HEADERS)] != _RUN_HISTORY_HEADERS:
+                ws.update(
+                    range_name=f"A1:{chr(64 + len(_RUN_HISTORY_HEADERS))}1",
+                    values=[_RUN_HISTORY_HEADERS],
+                )
+                self.log.info("google_sheets: reconciled Run History header to current schema")
+        except Exception as exc:  # noqa: BLE001
+            self.log.warning("google_sheets: header reconcile skipped: %s", exc)
 
         row = [
             run_summary.get("date", ""),

@@ -37,6 +37,27 @@ from config.logging_config import setup_logging
 from config.settings import Settings
 from sources._utils import utcnow
 
+
+def _classify_error(exc: Exception) -> str:
+    """Map an exception raised by a source client to a specific reason code.
+
+    Inspects the exception text for HTTP status codes / known markers so the
+    DM-finder can record *why* a source failed rather than a generic
+    "no_results". Used by Phase 13 lookup_attempts enrichment.
+    """
+    msg = str(exc).lower()
+    # HTTP status codes (clients raise httpx errors whose str() contains them)
+    if "401" in msg or "403" in msg or "unauthorized" in msg or "forbidden" in msg:
+        return "auth_failed"
+    if "404" in msg or "not found" in msg:
+        return "url_not_found"
+    if "429" in msg or "rate limit" in msg or "too many requests" in msg:
+        return "rate_limited"
+    if "timeout" in msg or "timed out" in msg or isinstance(exc, TimeoutError):
+        return "timeout"
+    return "error"
+
+
 if TYPE_CHECKING:
     from agents.icp_strategist import IcpStrategist
     from sinks.sqlite_store import LeadStore
@@ -134,19 +155,22 @@ class DecisionMakerFinder:
                 continue
 
             decision_makers: list[DecisionMaker] = []
+            # Phase 13: track how many raw DMs each source produced (pre-ICP-filter)
+            raw_source_counts: dict[str, int] = {}
 
             # -----------------------------------------------------------------
             # Tier A: ScrapeGraph
             # -----------------------------------------------------------------
             if sg_calls_remaining > 0:
-                sg_dms = await self._find_via_scrapegraph(qualified, icp)
+                sg_dms, sg_reason = await self._find_via_scrapegraph(qualified, icp)
                 if sg_dms:
                     decision_makers.extend(sg_dms)
                     sg_hits += len(sg_dms)
                     api_credits_used["scrapegraph"] += 1
+                    raw_source_counts["scrapegraph"] = len(sg_dms)
                     attempts["scrapegraph"] = f"found_{len(sg_dms)}"
                 else:
-                    attempts["scrapegraph"] = "no_results"
+                    attempts["scrapegraph"] = sg_reason
                 sg_calls_remaining -= 1
                 if sg_calls_remaining == 0:
                     self.log.info(
@@ -155,7 +179,7 @@ class DecisionMakerFinder:
                         scrapegraph_cap_per_segment,
                     )
             else:
-                attempts["scrapegraph"] = "cap_reached"
+                attempts["scrapegraph"] = "not_attempted"
 
             # -----------------------------------------------------------------
             # Tier B: Apify LinkedIn (tier_1 only, fallback when SG returned nothing)
@@ -165,14 +189,15 @@ class DecisionMakerFinder:
                 and qualified.tier == "tier_1"
                 and apify_calls_remaining > 0
             ):
-                apify_dms = await self._find_via_apify_linkedin(qualified, icp)
+                apify_dms, apify_reason = await self._find_via_apify_linkedin(qualified, icp)
                 if apify_dms:
                     decision_makers.extend(apify_dms)
                     apify_hits += len(apify_dms)
                     api_credits_used["apify"] += 2
+                    raw_source_counts["apify"] = len(apify_dms)
                     attempts["apify"] = f"found_{len(apify_dms)}"
                 else:
-                    attempts["apify"] = "no_results"
+                    attempts["apify"] = apify_reason
                 apify_calls_remaining -= 1
                 if apify_calls_remaining == 0:
                     self.log.info(
@@ -181,9 +206,9 @@ class DecisionMakerFinder:
                         apify_cap_per_run,
                     )
             elif not decision_makers and qualified.tier == "tier_2":
-                attempts["apify"] = "not_attempted_tier2"
+                attempts["apify"] = "not_attempted"
             elif not decision_makers and apify_calls_remaining == 0:
-                attempts["apify"] = "cap_reached"
+                attempts["apify"] = "not_attempted"
 
             # -----------------------------------------------------------------
             # Tier C: Explorium (tier_1 only, last resort)
@@ -193,14 +218,15 @@ class DecisionMakerFinder:
                 and qualified.tier == "tier_1"
                 and explorium_calls_remaining > 0
             ):
-                explorium_dms = await self._find_via_explorium(qualified, icp)
+                explorium_dms, explorium_reason = await self._find_via_explorium(qualified, icp)
                 if explorium_dms:
                     decision_makers.extend(explorium_dms)
                     explorium_hits += len(explorium_dms)
                     api_credits_used["explorium"] += 1
+                    raw_source_counts["explorium"] = len(explorium_dms)
                     attempts["explorium"] = f"found_{len(explorium_dms)}"
                 else:
-                    attempts["explorium"] = "no_results"
+                    attempts["explorium"] = explorium_reason
                 explorium_calls_remaining -= 1
                 if explorium_calls_remaining == 0:
                     self.log.info(
@@ -209,10 +235,7 @@ class DecisionMakerFinder:
                         explorium_cap_per_run,
                     )
             elif not decision_makers:
-                if qualified.tier == "tier_1" and explorium_calls_remaining == 0:
-                    attempts.setdefault("explorium", "cap_reached")
-                else:
-                    attempts.setdefault("explorium", "not_attempted_tier2")
+                attempts.setdefault("explorium", "not_attempted")
 
             # -----------------------------------------------------------------
             # Filter, rank, cap
@@ -220,12 +243,29 @@ class DecisionMakerFinder:
             filtered = self._filter_by_icp(decision_makers, icp)
             final_dms = self._rank_and_cap(filtered, max_per_company)
 
+            # Phase 13: if a source produced raw DMs but the ICP filter removed
+            # all of them, relabel that source's attempt as filtered_out_by_icp
+            # so we can see exactly where the candidate was lost.
+            if not final_dms and raw_source_counts:
+                for src, cnt in raw_source_counts.items():
+                    if cnt > 0 and attempts.get(src, "").startswith("found_"):
+                        attempts[src] = "filtered_out_by_icp"
+
             if final_dms:
                 status = "found"
             elif domain.endswith(".unknown") or domain_is_news_source(domain):
                 status = "needs_manual_lookup"
             else:
                 status = "no_decision_maker"
+
+            # Phase 13: log exactly why a candidate yielded no decision-maker
+            if status == "no_decision_maker":
+                self.log.info(
+                    "DM-finder no_decision_maker for %s (%s): attempts=%s",
+                    getattr(candidate, "name", domain),
+                    domain,
+                    attempts,
+                )
 
             candidates_with_people.append(
                 QualifiedCandidateWithPeople(
@@ -296,8 +336,12 @@ class DecisionMakerFinder:
         self,
         qualified: QualifiedCandidate,
         icp,
-    ) -> list[DecisionMaker]:
-        """Extract decision-makers via ScrapeGraph team-page extraction."""
+    ) -> tuple[list[DecisionMaker], str]:
+        """Extract decision-makers via ScrapeGraph team-page extraction.
+
+        Returns (decision_makers, reason_code). reason_code is one of
+        "found", "fetched_but_empty", or an error code from _classify_error.
+        """
         candidate = qualified.candidate  # type: ignore[attr-defined]
         domain: str = getattr(candidate, "domain", "") or ""
         website: Optional[str] = getattr(candidate, "website", None)
@@ -308,15 +352,17 @@ class DecisionMakerFinder:
         elif domain:
             base_url = f"https://{domain}"
         else:
-            return []
+            return [], "url_not_found"
 
         try:
             prospects = await self.scrapegraph_client.extract_team_page(base_url)
         except Exception as exc:  # noqa: BLE001
+            reason = _classify_error(exc)
             self.log.warning(
-                "scrapegraph extract_team_page failed for %s: %s", base_url, exc
+                "scrapegraph extract_team_page failed for %s: %s (%s)",
+                base_url, exc, reason,
             )
-            return []
+            return [], reason
 
         results: list[DecisionMaker] = []
         for p in prospects:
@@ -330,25 +376,29 @@ class DecisionMakerFinder:
                     seniority_score=score,
                 )
             )
-        return results
+        if not results:
+            return [], "fetched_but_empty"
+        return results, "found"
 
     async def _find_via_apify_linkedin(
         self,
         qualified: QualifiedCandidate,
         icp,
-    ) -> list[DecisionMaker]:
+    ) -> tuple[list[DecisionMaker], str]:
         """Find decision-makers via Apify LinkedIn company profile scrape.
 
         Step A: Google search for company LinkedIn URL.
         Step B: Apify LinkedIn company scraper to get employees.
         Counts as 2 Apify calls toward the cap.
+
+        Returns (decision_makers, reason_code).
         """
         candidate = qualified.candidate  # type: ignore[attr-defined]
         name: str = getattr(candidate, "name", "") or ""
         domain: str = getattr(candidate, "domain", "") or ""
 
         if not name:
-            return []
+            return [], "url_not_found"
 
         # Step A: find LinkedIn company URL
         try:
@@ -356,8 +406,12 @@ class DecisionMakerFinder:
                 f'"{name}" site:linkedin.com/company', num_results=3
             )
         except Exception as exc:  # noqa: BLE001
-            self.log.warning("apify google_search for LinkedIn failed (%s): %s", name, exc)
-            return []
+            reason = _classify_error(exc)
+            self.log.warning(
+                "apify google_search for LinkedIn failed (%s): %s (%s)",
+                name, exc, reason,
+            )
+            return [], reason
 
         linkedin_url: Optional[str] = None
         for r in search_results:
@@ -367,14 +421,18 @@ class DecisionMakerFinder:
 
         if not linkedin_url:
             self.log.info("apify: no LinkedIn company URL found for %s", name)
-            return []
+            return [], "url_not_found"
 
         # Step B: scrape company employees
         try:
             company_data = await self.apify_client.linkedin_company(linkedin_url)
         except Exception as exc:  # noqa: BLE001
-            self.log.warning("apify linkedin_company failed for %s: %s", linkedin_url, exc)
-            return []
+            reason = _classify_error(exc)
+            self.log.warning(
+                "apify linkedin_company failed for %s: %s (%s)",
+                linkedin_url, exc, reason,
+            )
+            return [], reason
 
         # Extract employees list from the scraped data
         employees: list[dict] = []
@@ -387,7 +445,7 @@ class DecisionMakerFinder:
             )
 
         if not employees:
-            return []
+            return [], "fetched_but_empty"
 
         # Filter by ICP target titles / levels
         target_titles_lower = [t.lower() for t in (icp.target_titles or [])]
@@ -420,19 +478,25 @@ class DecisionMakerFinder:
                 )
             )
 
-        return results
+        if not results:
+            # employees came back but none matched ICP titles/levels
+            return [], "filtered_out_by_icp"
+        return results, "found"
 
     async def _find_via_explorium(
         self,
         qualified: QualifiedCandidate,
         icp,
-    ) -> list[DecisionMaker]:
-        """Find decision-makers via Explorium / Vibe Prospecting API."""
+    ) -> tuple[list[DecisionMaker], str]:
+        """Find decision-makers via Explorium / Vibe Prospecting API.
+
+        Returns (decision_makers, reason_code).
+        """
         candidate = qualified.candidate  # type: ignore[attr-defined]
         domain: str = getattr(candidate, "domain", "") or ""
 
         if not domain:
-            return []
+            return [], "url_not_found"
 
         try:
             prospects = await self.vibe_prospecting_client.find_prospects(
@@ -443,8 +507,12 @@ class DecisionMakerFinder:
                 has_email=False,  # Phase 6 handles emails
             )
         except Exception as exc:  # noqa: BLE001
-            self.log.warning("explorium find_prospects failed for %s: %s", domain, exc)
-            return []
+            reason = _classify_error(exc)
+            self.log.warning(
+                "explorium find_prospects failed for %s: %s (%s)",
+                domain, exc, reason,
+            )
+            return [], reason
 
         results: list[DecisionMaker] = []
         for p in prospects:
@@ -458,7 +526,9 @@ class DecisionMakerFinder:
                     seniority_score=score,
                 )
             )
-        return results
+        if not results:
+            return [], "fetched_but_empty"
+        return results, "found"
 
     # =========================================================================
     # Filtering and ranking
